@@ -3,7 +3,7 @@ module Servant.Subscriber.Response where
 
 import Data.Tuple (Tuple)
 import Prim (Array, Int, String)
-import Servant.Subscriber.Request (Request)
+import Servant.Subscriber.Request (HttpRequest)
 import Servant.Subscriber.Types (Path)
 
 import Data.Generic (class Generic)
@@ -14,7 +14,7 @@ data Response =
   | Deleted Path
   | Unsubscribed Path
   | ParseError 
-  | RequestError Request RequestError
+  | RequestError RequestError
 
 derive instance genericResponse :: Generic Response
 
@@ -36,9 +36,9 @@ data Status =
 derive instance genericStatus :: Generic Status
 
 data RequestError =
-    ServerError HttpResponse
-  | NoSuchSubscription 
-  | AlreadySubscribed 
+    HttpRequestFailed HttpRequest HttpResponse
+  | NoSuchSubscription Path
+  | AlreadySubscribed Path
 
 derive instance genericRequestError :: Generic RequestError
 
