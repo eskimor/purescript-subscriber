@@ -10,7 +10,8 @@ import Data.Generic (class Generic)
 
 
 data Response =
-    Modified Path HttpResponse
+    Subscribed Path
+  | Modified Path HttpResponse
   | Deleted Path
   | Unsubscribed Path
   | ParseError 
