@@ -23,7 +23,7 @@ import Data.StrMap as StrMap
 import Servant.Subscriber.Response as Resp
 import WebSocket as WS
 import Control.Monad.Eff.Exception (EXCEPTION, Error)
-import Control.Monad.Eff.Ref (writeRef, Ref, REF, newRef, modifyRef, modifyRef')
+import Control.Monad.Eff.Ref (writeRef, Ref, REF, newRef, modifyRef, modifyRef', readRef)
 import Control.Monad.Maybe.Trans (runMaybeT)
 import DOM.Event.Types (domTransactionEventToEvent, offlineAudioCompletionEventToEvent)
 import DOM.Event.Types (Event, MessageEvent, CloseEvent)
@@ -32,6 +32,7 @@ import Data.Argonaut.Printer (printJson)
 import Data.Generic (class Generic)
 import Data.StrMap (StrMap)
 import WebSocket (WEBSOCKET, Connection(..), newWebSocket, Message(..))
+import Unsafe.Coerce
 
 
 type SubscriberEff eff = Eff (ref :: REF, ws :: WEBSOCKET | eff)
@@ -68,6 +69,9 @@ data SubscriptionState = Requested | Sent | Subscribed
 
 derive instance eqSubscriptionState :: Eq SubscriptionState
 
+coerceEffects :: forall eff0 eff1 a. Eff eff0 a -> Eff eff1 a
+coerceEffects = unsafeCoerce
+
 mkSubscriber :: forall eff. String -> (NotifyEvent -> SubscriberEff eff Unit) -> SubscriberEff eff SubscriberImpl
 mkSubscriber url h = do
   connRef <- newRef Nothing
@@ -75,7 +79,7 @@ mkSubscriber url h = do
   return $ SubscriberImpl {
                 subscriptions : subscriptions
               , url : WS.URL url
-              , notify : h
+              , notify : coerceEffects <<< h
               , connection : connRef
               }
 
@@ -86,13 +90,28 @@ subscribe request impl'@(SubscriberImpl impl) = do
 
 -- | Takes care of actually subscribing stuff.
 realize :: forall eff. SubscriberImpl -> SubscriberEff eff Unit
-realize (SubscriberImpl impl) = do
-      subscriptions <- Ref.readRef impl.subscriptions
-      let requested = List.filter (_.state == Requested) <<< StrMap.values $ subscriptions
+realize impl'@(SubscriberImpl impl) = do
+      requested <- List.filter ((_ == Requested) <<< _.state) <<< StrMap.values <$> Ref.readRef impl.subscriptions
       let mkMsg = Message <<< printJson <<< gAesonEncodeJson <<< Subscribe
       let msgs = map (mkMsg <<< _.req) requested
-      traversed impl.connection.send msgs
+      conn <- getConnection impl'
+      traversed conn.send msgs
       modifyRef impl.subscriptions $ over (traversed.state) (match Requested .~ Sent)
+
+getConnection :: forall eff. SubscriberImpl -> SubscriberEff eff Connection
+getConnection impl'@(SubscriberImpl impl) = do
+    mConn <- readRef impl.connection
+    case mConn of
+      Nothing -> makeConnection impl'
+      Just conn -> return conn
+
+
+makeConnection :: forall eff. SubscriberImpl -> SubscriberEff eff Connection
+makeConnection (SubscriberImpl impl) = do
+    conn <- newWebSocket impl.url []
+    -- TODO: Configure connection with handlers & stuff & handle exceptions
+    writeRef impl.connection $ Just conn
+    return conn
 
 initConnection :: forall eff eff1. SubscriberImpl -> Connection -> (NotifyEvent -> Eff eff Unit) -> SubscriberEff eff1 Unit
 initConnection impl'@(SubscriberImpl impl) conn'@(Connection conn) h = do
