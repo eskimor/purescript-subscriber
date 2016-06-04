@@ -15,6 +15,7 @@ import DOM.Event.Types (MessageEvent)
 import Data.Argonaut.Aeson (gAesonEncodeJson, gAesonDecodeJson)
 import Data.Argonaut.Parser (jsonParser)
 import Data.Argonaut.Printer (printJson)
+import Data.Bifunctor (rmap)
 import Data.Either (Either(Right, Left))
 import Data.Foldable (sequence_, intercalate)
 import Data.Generic (class Generic)
@@ -91,7 +92,8 @@ realize impl'@(SubscriberImpl impl) = do
       let msgs = map (mkMsg <<< _.req) requested
       Connection conn <- getConnection impl'
       sequence_ $ map (coerceEffects <<< conn.send) msgs
---      modifyRef impl.subscriptions $ over (mapped <<< state <<< match Requested) (const Sent)
+    --  modifyRef impl.subscriptions $ over (mapped <<< state <<< match Requested) (const Sent) -- Does not work currently.
+      modifyRef impl.subscriptions $ map (\sub -> if sub.state == Requested then sub { state = Sent } else sub)
 
 getConnection :: forall eff. SubscriberImpl -> SubscriberEff eff Connection
 getConnection impl'@(SubscriberImpl impl) = do
@@ -131,13 +133,13 @@ ourHandler (SubscriberImpl impl) h msgEvent =  do
     case eDecoded of
       Left err -> h $ ParseError err
       Right resp -> do
-          case resp of
-            Resp.Subscribed path   -> modifyRef impl.subscriptions $ at (pathToKey path) <<< _Just <<< state .~ Subscribed
-            Resp.Deleted path      -> modifyRef impl.subscriptions $ at (pathToKey path) .~ (Nothing :: Maybe Subscription)
-            Resp.Unsubscribed path -> modifyRef impl.subscriptions $ at (pathToKey path) .~ (Nothing :: Maybe Subscription)
-            Resp.Modified _ _      -> return unit
-            Resp.ParseError        -> return unit
-            Resp.RequestError _    -> return unit
+          modifyRef impl.subscriptions $ case resp of
+              Resp.Subscribed path   -> at (pathToKey path) <<< _Just <<< state .~ Subscribed
+              Resp.Deleted path      -> at (pathToKey path) .~ (Nothing :: Maybe Subscription)
+              Resp.Unsubscribed path -> at (pathToKey path) .~ (Nothing :: Maybe Subscription)
+              Resp.Modified _ _      -> id
+              Resp.ParseError        -> id
+              Resp.RequestError _    -> id
           h $ NotifyEvent resp
 
 reqToPath :: HttpRequest -> Path
