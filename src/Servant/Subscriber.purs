@@ -1,41 +1,37 @@
 module Servant.Subscriber where
 
 import Prelude
-import Servant.Subscriber.Request
-import Servant.Subscriber.Response
-import Servant.Subscriber.Types
-import Control.Bind
-import Control.Monad
-import Control.Monad.Eff
-import Data.Argonaut.Parser
-import Data.Bifunctor
-import Data.Either
-import Data.Foldable
-import Data.Maybe
-import Data.Lens.Types
-import Data.Lens.Lens
-import Data.Lens
-import Data.Lens.At
 import Control.Monad.Eff.Ref as Ref
 import Control.Monad.Eff.Var as Var
 import Data.List as List
 import Data.StrMap as StrMap
 import Servant.Subscriber.Response as Resp
 import WebSocket as WS
-import Control.Monad.Eff.Exception (EXCEPTION, Error)
-import Control.Monad.Eff.Ref (writeRef, Ref, REF, newRef, modifyRef, modifyRef', readRef)
-import Control.Monad.Maybe.Trans (runMaybeT)
-import DOM.Event.Types (domTransactionEventToEvent, offlineAudioCompletionEventToEvent)
-import DOM.Event.Types (Event, MessageEvent, CloseEvent)
+import Control.Bind ((<=<))
+import Control.Monad.Eff (Eff)
+import Control.Monad.Eff.Exception (Error, EXCEPTION, catchException)
+import Control.Monad.Eff.Ref (Ref, REF, modifyRef, writeRef, newRef, readRef)
+import DOM.Event.Types (MessageEvent)
 import Data.Argonaut.Aeson (gAesonEncodeJson, gAesonDecodeJson)
+import Data.Argonaut.Parser (jsonParser)
 import Data.Argonaut.Printer (printJson)
+import Data.Either (Either(Right, Left))
+import Data.Foldable (sequence_, intercalate)
 import Data.Generic (class Generic)
+import Data.Lens (prism, (.~), _Just)
+import Data.Lens.At (at)
+import Data.Lens.Lens (lens)
+import Data.Lens.Types (PrismP, LensP)
+import Data.Maybe (Maybe(Nothing, Just))
 import Data.StrMap (StrMap)
+import Servant.Subscriber.Request (HttpRequest(HttpRequest), Request(Subscribe))
+import Servant.Subscriber.Response (Response)
+import Servant.Subscriber.Types (Path(Path))
+import Unsafe.Coerce (unsafeCoerce)
 import WebSocket (WEBSOCKET, Connection(..), newWebSocket, Message(..))
-import Unsafe.Coerce
 
 
-type SubscriberEff eff = Eff (ref :: REF, ws :: WEBSOCKET | eff)
+type SubscriberEff eff = Eff (ref :: REF, ws :: WEBSOCKET, err :: EXCEPTION | eff)
 
 
 newtype SubscriberImpl = SubscriberImpl {
@@ -47,7 +43,6 @@ newtype SubscriberImpl = SubscriberImpl {
 
 data NotifyEvent = NotifyEvent Response
     | ParseError String -- We could not parse the server's response
-    | JSException Error -- Some JavaScript exception occurred
 
 derive instance genericNotifyEvent :: Generic NotifyEvent
 
@@ -85,7 +80,7 @@ mkSubscriber url h = do
 
 subscribe :: forall eff. HttpRequest -> SubscriberImpl -> SubscriberEff eff Unit
 subscribe request impl'@(SubscriberImpl impl) = do
-  modifyRef impl.subscriptions $ at (reqToKey req) .~ Just { state : Requested, req : request }
+  modifyRef impl.subscriptions $ at (reqToKey request) .~ Just { state : Requested, req : request }
   realize impl'
 
 -- | Takes care of actually subscribing stuff.
@@ -94,9 +89,9 @@ realize impl'@(SubscriberImpl impl) = do
       requested <- List.filter ((_ == Requested) <<< _.state) <<< StrMap.values <$> Ref.readRef impl.subscriptions
       let mkMsg = Message <<< printJson <<< gAesonEncodeJson <<< Subscribe
       let msgs = map (mkMsg <<< _.req) requested
-      conn <- getConnection impl'
-      traversed conn.send msgs
-      modifyRef impl.subscriptions $ over (traversed.state) (match Requested .~ Sent)
+      Connection conn <- getConnection impl'
+      sequence_ $ map (coerceEffects <<< conn.send) msgs
+--      modifyRef impl.subscriptions $ over (mapped <<< state <<< match Requested) (const Sent)
 
 getConnection :: forall eff. SubscriberImpl -> SubscriberEff eff Connection
 getConnection impl'@(SubscriberImpl impl) = do
@@ -112,26 +107,23 @@ makeConnection (SubscriberImpl impl) = do
     -- TODO: Configure connection with handlers & stuff & handle exceptions
     writeRef impl.connection $ Just conn
     return conn
-
-initConnection :: forall eff eff1. SubscriberImpl -> Connection -> (NotifyEvent -> Eff eff Unit) -> SubscriberEff eff1 Unit
+{--
+initConnection :: forall eff. SubscriberImpl -> Connection -> (NotifyEvent -> SubscriberEff eff Unit) -> SubscriberEff eff Unit
 initConnection impl'@(SubscriberImpl impl) conn'@(Connection conn) h = do
       Var.set conn.onclose closeHandler
   where
-    openConnection :: forall eff. SubscriberEff eff Unit
+    openConnection :: SubscriberEff eff Unit
     openConnection = do
       conn <- newWebSocket impl.url []
       connRef <- newRef conn
       initConnection impl' conn' h
       writeRef impl.connection connRef
 
-    closeHandler :: forall eff. CloseEvent -> SubscriberEff Unit
+    closeHandler :: CloseEvent -> SubscriberEff Unit
     closeHandler _ = do
       modifyRef impl.subscriptions $ over (traversed.state) (_ .~ Requested)
       writeRef impl.connection Nothing
-
-    openHandler :: forall eff. Event -> SubscriberEff Unit
-    openHandler _ = realize impl'
-
+--}
 ourHandler :: forall eff. SubscriberImpl -> (NotifyEvent -> SubscriberEff eff Unit) -> MessageEvent -> SubscriberEff eff Unit
 ourHandler (SubscriberImpl impl) h msgEvent =  do
     let msg = WS.runMessage <<< WS.runMessageEvent $ msgEvent
@@ -141,15 +133,15 @@ ourHandler (SubscriberImpl impl) h msgEvent =  do
       Right resp -> do
           case resp of
             Resp.Subscribed path   -> modifyRef impl.subscriptions $ at (pathToKey path) <<< _Just <<< state .~ Subscribed
-      --      Resp.Deleted path      -> modifyRef impl.subscriptions $ at (pathToKey path) .~ Nothing
-      --      Resp.Unsubscribed path -> modifyRef impl.subscriptions $ at (pathToKey path) .~ Nothing
+            Resp.Deleted path      -> modifyRef impl.subscriptions $ at (pathToKey path) .~ (Nothing :: Maybe Subscription)
+            Resp.Unsubscribed path -> modifyRef impl.subscriptions $ at (pathToKey path) .~ (Nothing :: Maybe Subscription)
             Resp.Modified _ _      -> return unit
             Resp.ParseError        -> return unit
             Resp.RequestError _    -> return unit
           h $ NotifyEvent resp
 
 reqToPath :: HttpRequest -> Path
-reqToPath (HttpRequest req) = req.httpPath
+reqToPath (HttpRequest r) = r.httpPath
 
 reqToKey :: HttpRequest -> String
 reqToKey = pathToKey <<< reqToPath
@@ -160,3 +152,7 @@ pathToKey (Path p) = intercalate "/" p
 -- | Prism for only setting a value if it is equal to a.
 match :: forall a. Eq a => a -> PrismP a a
 match a = prism id $ \b -> if a == b then Right a else Left b
+
+
+try :: forall a eff. Eff (err :: EXCEPTION | eff) a -> Eff eff (Either Error a)
+try action = catchException (return <<< Left) (map Right action)
