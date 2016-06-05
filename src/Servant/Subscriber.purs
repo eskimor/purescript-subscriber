@@ -1,4 +1,12 @@
-module Servant.Subscriber where
+module Servant.Subscriber (
+    makeSubscriber
+  , subscribe
+  , unsubscribe
+  , close
+  , Subscriber
+  , NotifyEvent (..)
+  , SubscriberEff
+  ) where
 
 import Prelude
 import Control.Monad.Eff.Ref as Ref
@@ -11,25 +19,25 @@ import Control.Bind ((<=<))
 import Control.Monad.Eff (Eff)
 import Control.Monad.Eff.Exception (Error, EXCEPTION, catchException)
 import Control.Monad.Eff.Ref (Ref, REF, modifyRef, writeRef, newRef, readRef)
-import DOM.Event.Types (Event, MessageEvent)
+import DOM.Event.Types (CloseEvent, Event, MessageEvent)
 import Data.Argonaut.Aeson (gAesonEncodeJson, gAesonDecodeJson)
 import Data.Argonaut.Parser (jsonParser)
 import Data.Argonaut.Printer (printJson)
-import Data.Bifunctor (rmap)
 import Data.Either (Either(Right, Left))
-import Data.Foldable (sequence_, intercalate)
+import Data.Foldable (sequence_, intercalate, foldl)
 import Data.Generic (class Generic)
-import Data.Lens (prism, (.~), _Just)
+import Data.Lens (view, prism, (.~), _Just, _2)
 import Data.Lens.At (at)
 import Data.Lens.Lens (lens)
 import Data.Lens.Types (PrismP, LensP)
 import Data.Maybe (Maybe(Nothing, Just))
 import Data.StrMap (StrMap)
-import Servant.Subscriber.Request (HttpRequest(HttpRequest), Request(Subscribe))
+import Data.Tuple (fst)
+import Servant.Subscriber.Request (HttpRequest(HttpRequest), Request(Subscribe, Unsubscribe))
 import Servant.Subscriber.Response (Response)
 import Servant.Subscriber.Types (Path(Path))
 import Unsafe.Coerce (unsafeCoerce)
-import WebSocket (WEBSOCKET, Connection(..), newWebSocket, Message(..))
+import WebSocket (ReadyState(Open), Code(Code), WEBSOCKET, Connection(..), newWebSocket, Message(..))
 
 
 type SubscriberEff eff = Eff (ref :: REF, ws :: WEBSOCKET, err :: EXCEPTION | eff)
@@ -47,15 +55,15 @@ newtype Subscriber = Subscriber SubscriberImpl
 
 data NotifyEvent = NotifyEvent Response
     | ParseError String -- We could not parse the server's response
-    | WebSocketError Event
-    | WebSocketClosed Event
+    | WebSocketError
+    | WebSocketClosed
 
 derive instance genericNotifyEvent :: Generic NotifyEvent
 
 type Subscriptions = StrMap Subscription
 
 type Subscription = {
-    req :: HttpRequest
+    req :: Request
   , state :: SubscriptionState
   }
 
@@ -66,15 +74,15 @@ state :: forall r a. LensP ({ state :: a | r}) a
 state = lens _.state (\r -> r { state = _ })
 
 
-data SubscriptionState = Requested | Sent | Subscribed | Unsubscribed
+data SubscriptionState = Ordered | Sent | Confirmed
 
 derive instance eqSubscriptionState :: Eq SubscriptionState
 
 coerceEffects :: forall eff0 eff1 a. Eff eff0 a -> Eff eff1 a
 coerceEffects = unsafeCoerce
 
-mkSubscriber :: forall eff. String -> (NotifyEvent -> SubscriberEff eff Unit) -> SubscriberEff eff Subscriber
-mkSubscriber url h = do
+makeSubscriber :: forall eff. String -> (NotifyEvent -> SubscriberEff eff Unit) -> SubscriberEff eff Subscriber
+makeSubscriber url h = do
       connRef <- newRef Nothing
       subscriptions <- Ref.newRef StrMap.empty
       return $ Subscriber {
@@ -91,39 +99,44 @@ close (Subscriber impl) = do
       mConn <- readRef impl.connection
       case mConn of
         Nothing -> return unit
-        Just (Connection conn) -> conn.close (Just 1000) Nothing
+        Just (Connection conn) -> conn.close (Just (Code 1000)) Nothing
 
 subscribe :: forall eff. HttpRequest -> Subscriber -> SubscriberEff eff Unit
 subscribe request (Subscriber impl) = do
-      modifyRef impl.subscriptions $ at (reqToKey request) .~ Just { state : Requested, req : request }
+      modifyRef impl.subscriptions $ at (reqToKey request) .~ Just { state : Ordered, req : Subscribe request }
       tryRealize impl
 
 unsubscribe :: forall eff. Path -> Subscriber -> SubscriberEff eff Unit
 unsubscribe p (Subscriber impl) = do
       mc <- readRef impl.connection
       case mc of
-        Nothing -> modifyRef impl.subscriptions $ at (pathToKey p) .~ (Nothing :: Subscription)
+        Nothing -> modifyRef impl.subscriptions $ StrMap.delete (pathToKey p)
         Just c -> do
-          modifyRef impl.subscriptions $ at (pathToKey p) <<< _Just <<< state .~ Unsubscribed
-          realize c impl
+          modifyRef impl.subscriptions $ at (pathToKey p) <<< _Just .~ { req : Unsubscribe p, state : Ordered }
+          tryRealize impl
 
 
 tryRealize :: forall eff. SubscriberImpl -> SubscriberEff eff Unit
 tryRealize impl = do
       mc <- readRef impl.connection
       case mc of
-          Nothing -> return unit
-          Just c -> realize c impl
+          Nothing -> makeConnection impl
+          Just c'@(Connection c) -> do
+            rdy <- Var.get c.readyState
+            case rdy of
+              Open -> realize c' impl
+              _    -> return unit
 
 -- | Takes care of actually subscribing stuff.
 realize :: forall eff. Connection -> SubscriberImpl -> SubscriberEff eff Unit
 realize (Connection conn) impl = do
-      requested <- List.filter ((_ == Requested) <<< _.state) <<< StrMap.values <$> Ref.readRef impl.subscriptions
-      let mkMsg = Message <<< printJson <<< gAesonEncodeJson <<< Subscribe
-      let msgs = map (mkMsg <<< _.req) requested
+      ordered <- List.filter ((_ == Ordered) <<< _.state) <<< StrMap.values <$> Ref.readRef impl.subscriptions
+      let mkMsg = Message <<< printJson <<< gAesonEncodeJson
+      let msgs = map (mkMsg <<< _.req) ordered
       sequence_ $ map (coerceEffects <<< conn.send) msgs
     --  modifyRef impl.subscriptions $ over (mapped <<< state <<< match Requested) (const Sent) -- Does not work currently.
-      modifyRef impl.subscriptions $ map (\sub -> if sub.state == Requested then sub { state = Sent } else sub)
+    --  modifyRef impl.subscriptions $ traverse <<< state <<< filtered (_ == Ordered) .~ Sent -- Does not work currently
+      modifyRef impl.subscriptions $ map (\sub -> if sub.state == Ordered then sub { state = Sent } else sub)
 
 initConnection :: forall eff. SubscriberImpl -> SubscriberEff eff Unit
 initConnection impl = do
@@ -135,31 +148,42 @@ initConnection impl = do
 
 makeConnection :: forall eff. SubscriberImpl -> SubscriberEff eff Unit
 makeConnection impl = do
-      conn <- newWebSocket impl.url []
+      Connection conn <- newWebSocket impl.url []
       Var.set conn.onclose   $ closeHandler impl
       Var.set conn.onmessage $ messageHandler impl
       Var.set conn.onerror   $ errorHandler impl
-      Var.set conn.onopen    $ openHandler conn impl
+      Var.set conn.onopen    $ openHandler (Connection conn) impl
+      writeRef impl.connection $ Just (Connection conn)
+
 
 openHandler :: forall eff. Connection -> SubscriberImpl -> Event -> SubscriberEff eff Unit
-openHandler conn impl _ = do
-      writeRef impl.connection $ Just conn
-      realize impl
+openHandler conn impl _ = realize conn impl
 
 closeHandler :: forall eff. SubscriberImpl -> CloseEvent -> SubscriberEff eff Unit
-closeHandler impl ev = do
+closeHandler impl _ = do
       writeRef impl.connection Nothing
       subs <- readRef impl.subscriptions
       if StrMap.isEmpty subs
         then return unit
         else do
-          modifyRef impl.subscriptions $ map ( _ { state = Requested })
+          modifyRef impl.subscriptions $ updateSubscriptions
           makeConnection impl
-      impl.notify $ WebSocketClose ev
+      impl.notify $ WebSocketClosed
+  where
+    isUnsubscribe :: Request -> Boolean
+    isUnsubscribe (Unsubscribe _) = true
+    isUnsubscribe _ = false
+
+    updateSubscriptions :: Subscriptions -> Subscriptions
+    updateSubscriptions subs = let
+          forRemoval = map fst <<< List.filter (isUnsubscribe <<< view (_2 <<< req)) <<< StrMap.toList $ subs
+          cleanedSubs = foldl (flip StrMap.delete) subs forRemoval
+        in
+          map ( _ { state = Ordered } ) cleanedSubs
 
 errorHandler :: forall eff. SubscriberImpl -> Event -> SubscriberEff eff Unit
-errorHandler impl ev = do
-      impl.notify $ WebSocketError ev
+errorHandler impl _ = do
+      impl.notify $ WebSocketError
       tryRealize impl -- Something went wrong - retry. (TODO: Probably better with some timeout!)
 
 
@@ -171,7 +195,7 @@ messageHandler impl msgEvent =  do
         Left err -> impl.notify $ ParseError err
         Right resp -> do
             modifyRef impl.subscriptions $ case resp of
-                Resp.Subscribed path   -> at (pathToKey path) <<< _Just <<< state .~ Subscribed
+                Resp.Subscribed path   -> at (pathToKey path) <<< _Just <<< state .~ Confirmed
                 Resp.Deleted path      -> at (pathToKey path) .~ (Nothing :: Maybe Subscription)
                 Resp.Unsubscribed path -> at (pathToKey path) .~ (Nothing :: Maybe Subscription)
                 Resp.Modified _ _      -> id
