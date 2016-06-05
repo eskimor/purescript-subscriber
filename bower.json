@@ -18,7 +18,8 @@
     "purescript-argonaut-codecs": "^0.6.1",
     "purescript-profunctor-lenses": "^0.5.4",
     "purescript-prelude": "^1.0.0",
-    "purescript-bifunctors": "^1.0.0"
+    "purescript-bifunctors": "^1.0.0",
+    "purescript-partial": "^1.1.2"
   },
   "resolutions": {
     "purescript-prelude": "~0.1.5",
