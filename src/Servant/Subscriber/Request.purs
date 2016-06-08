@@ -17,7 +17,8 @@ derive instance genericRequest :: Generic Request
 
 data HttpRequest =
     HttpRequest {
-      httpPath :: Path
+      httpMethod :: String
+    , httpPath :: Path
     , httpHeaders :: Array (Tuple String String)
     , httpQuery :: Array (Tuple String (Maybe String))
     , httpBody :: String

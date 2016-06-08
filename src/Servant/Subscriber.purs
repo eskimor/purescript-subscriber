@@ -1,3 +1,4 @@
+-- TODO: ON ERROR: RECONNECT!
 module Servant.Subscriber (
     makeSubscriber
   , subscribe
@@ -11,6 +12,9 @@ module Servant.Subscriber (
 import Prelude
 import Control.Monad.Eff.Ref as Ref
 import Control.Monad.Eff.Var as Var
+import DOM.Event.CloseEvent as CloseEvent
+import DOM.Event.ErrorEvent as ErrorEvent
+import DOM.Event.Event as Event
 import Data.List as List
 import Data.StrMap as StrMap
 import Servant.Subscriber.Response as Resp
@@ -55,8 +59,8 @@ newtype Subscriber = Subscriber SubscriberImpl
 
 data NotifyEvent = NotifyEvent Response
     | ParseError String -- We could not parse the server's response
-    | WebSocketError
-    | WebSocketClosed
+    | WebSocketError String
+    | WebSocketClosed String
 
 derive instance genericNotifyEvent :: Generic NotifyEvent
 
@@ -160,7 +164,7 @@ openHandler :: forall eff. Connection -> SubscriberImpl -> Event -> SubscriberEf
 openHandler conn impl _ = realize conn impl
 
 closeHandler :: forall eff. SubscriberImpl -> CloseEvent -> SubscriberEff eff Unit
-closeHandler impl _ = do
+closeHandler impl ev = do
       writeRef impl.connection Nothing
       subs <- readRef impl.subscriptions
       if StrMap.isEmpty subs
@@ -168,7 +172,7 @@ closeHandler impl _ = do
         else do
           modifyRef impl.subscriptions $ updateSubscriptions
           makeConnection impl
-      impl.notify $ WebSocketClosed
+      impl.notify $ WebSocketClosed ("code: " <> (show <<< CloseEvent.code) ev <> ", reason: " <> CloseEvent.reason ev)
   where
     isUnsubscribe :: Request -> Boolean
     isUnsubscribe (Unsubscribe _) = true
@@ -182,8 +186,8 @@ closeHandler impl _ = do
           map ( _ { state = Ordered } ) cleanedSubs
 
 errorHandler :: forall eff. SubscriberImpl -> Event -> SubscriberEff eff Unit
-errorHandler impl _ = do
-      impl.notify $ WebSocketError
+errorHandler impl ev = do
+      impl.notify $ WebSocketError ((ErrorEvent.message <<< unsafeCoerce) ev)
       tryRealize impl -- Something went wrong - retry. (TODO: Probably better with some timeout!)
 
 
@@ -192,14 +196,13 @@ messageHandler impl msgEvent =  do
       let msg = WS.runMessage <<< WS.runMessageEvent $ msgEvent
       let eDecoded = gAesonDecodeJson <=< jsonParser $ msg
       case eDecoded of
-        Left err -> impl.notify $ ParseError err
+        Left err -> impl.notify $ ParseError (err <> ", input: '" <> msg <> "'")
         Right resp -> do
             modifyRef impl.subscriptions $ case resp of
                 Resp.Subscribed path   -> at (pathToKey path) <<< _Just <<< state .~ Confirmed
                 Resp.Deleted path      -> at (pathToKey path) .~ (Nothing :: Maybe Subscription)
                 Resp.Unsubscribed path -> at (pathToKey path) .~ (Nothing :: Maybe Subscription)
                 Resp.Modified _ _      -> id
-                Resp.ParseError        -> id
                 Resp.RequestError _    -> id
             impl.notify $ NotifyEvent resp
 
@@ -219,3 +222,5 @@ match a = prism id $ \b -> if a == b then Right a else Left b
 
 try :: forall a eff. Eff (err :: EXCEPTION | eff) a -> Eff eff (Either Error a)
 try action = catchException (return <<< Left) (map Right action)
+
+foreign import jsString :: forall a. a -> String

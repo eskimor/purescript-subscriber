@@ -14,7 +14,6 @@ data Response =
   | Modified Path HttpResponse
   | Deleted Path
   | Unsubscribed Path
-  | ParseError 
   | RequestError RequestError
 
 derive instance genericResponse :: Generic Response
@@ -37,7 +36,8 @@ data Status =
 derive instance genericStatus :: Generic Status
 
 data RequestError =
-    HttpRequestFailed HttpRequest HttpResponse
+    ParseError 
+  | HttpRequestFailed HttpRequest HttpResponse
   | NoSuchSubscription Path
   | AlreadySubscribed Path
 
