@@ -12,9 +12,6 @@ module Servant.Subscriber (
 import Prelude
 import Control.Monad.Eff.Ref as Ref
 import Control.Monad.Eff.Var as Var
-import DOM.Event.CloseEvent as CloseEvent
-import DOM.Event.ErrorEvent as ErrorEvent
-import DOM.Event.Event as Event
 import Data.List as List
 import Data.StrMap as StrMap
 import Servant.Subscriber.Response as Resp
@@ -23,8 +20,11 @@ import Control.Bind ((<=<))
 import Control.Monad.Eff (Eff)
 import Control.Monad.Eff.Exception (Error, EXCEPTION, catchException)
 import Control.Monad.Eff.Ref (Ref, REF, modifyRef, writeRef, newRef, readRef)
-import DOM.Event.Types (CloseEvent, Event, MessageEvent)
-import Data.Argonaut.Aeson (gAesonEncodeJson, gAesonDecodeJson)
+import DOM.Event.Types (Event)
+import DOM.Websocket.Event.Types (CloseEvent, MessageEvent)
+import DOM.Websocket.Event.CloseEvent as CloseEvent
+import DOM.HTML.Event.ErrorEvent as ErrorEvent
+import Data.Argonaut.Generic.Aeson (encodeJson, decodeJson)
 import Data.Argonaut.Parser (jsonParser)
 import Data.Argonaut.Printer (printJson)
 import Data.Either (Either(Right, Left))
@@ -89,7 +89,7 @@ makeSubscriber :: forall eff. String -> (NotifyEvent -> SubscriberEff eff Unit) 
 makeSubscriber url h = do
       connRef <- newRef Nothing
       subscriptions <- Ref.newRef StrMap.empty
-      return $ Subscriber {
+      pure $ Subscriber {
                     subscriptions : subscriptions
                   , url : WS.URL url
                   , notify : coerceEffects <<< h
@@ -102,8 +102,8 @@ close (Subscriber impl) = do
       writeRef impl.subscriptions StrMap.empty
       mConn <- readRef impl.connection
       case mConn of
-        Nothing -> return unit
-        Just (Connection conn) -> conn.close (Just (Code 1000)) Nothing
+        Nothing -> pure unit
+        Just (Connection conn) -> conn.close' (Code 1000) Nothing
 
 subscribe :: forall eff. HttpRequest -> Subscriber -> SubscriberEff eff Unit
 subscribe request (Subscriber impl) = do
@@ -129,13 +129,13 @@ tryRealize impl = do
             rdy <- Var.get c.readyState
             case rdy of
               Open -> realize c' impl
-              _    -> return unit
+              _    -> pure unit
 
 -- | Takes care of actually subscribing stuff.
 realize :: forall eff. Connection -> SubscriberImpl -> SubscriberEff eff Unit
 realize (Connection conn) impl = do
       ordered <- List.filter ((_ == Ordered) <<< _.state) <<< StrMap.values <$> Ref.readRef impl.subscriptions
-      let mkMsg = Message <<< printJson <<< gAesonEncodeJson
+      let mkMsg = Message <<< printJson <<< encodeJson
       let msgs = map (mkMsg <<< _.req) ordered
       sequence_ $ map (coerceEffects <<< conn.send) msgs
     --  modifyRef impl.subscriptions $ over (mapped <<< state <<< match Requested) (const Sent) -- Does not work currently.
@@ -147,7 +147,7 @@ initConnection impl = do
       mConn <- readRef impl.connection
       case mConn of
         Nothing -> makeConnection impl
-        Just _ -> return unit
+        Just _ -> pure unit
 
 
 makeConnection :: forall eff. SubscriberImpl -> SubscriberEff eff Unit
@@ -168,7 +168,7 @@ closeHandler impl ev = do
       writeRef impl.connection Nothing
       subs <- readRef impl.subscriptions
       if StrMap.isEmpty subs
-        then return unit
+        then pure unit
         else do
           modifyRef impl.subscriptions $ updateSubscriptions
           makeConnection impl
@@ -194,7 +194,7 @@ errorHandler impl ev = do
 messageHandler :: forall eff. SubscriberImpl -> MessageEvent -> SubscriberEff eff Unit
 messageHandler impl msgEvent =  do
       let msg = WS.runMessage <<< WS.runMessageEvent $ msgEvent
-      let eDecoded = gAesonDecodeJson <=< jsonParser $ msg
+      let eDecoded = decodeJson <=< jsonParser $ msg
       case eDecoded of
         Left err -> impl.notify $ ParseError (err <> ", input: '" <> msg <> "'")
         Right resp -> do
@@ -221,6 +221,6 @@ match a = prism id $ \b -> if a == b then Right a else Left b
 
 
 try :: forall a eff. Eff (err :: EXCEPTION | eff) a -> Eff eff (Either Error a)
-try action = catchException (return <<< Left) (map Right action)
+try action = catchException (pure <<< Left) (map Right action)
 
 foreign import jsString :: forall a. a -> String
