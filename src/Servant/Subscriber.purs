@@ -223,4 +223,3 @@ match a = prism id $ \b -> if a == b then Right a else Left b
 try :: forall a eff. Eff (err :: EXCEPTION | eff) a -> Eff eff (Either Error a)
 try action = catchException (pure <<< Left) (map Right action)
 
-foreign import jsString :: forall a. a -> String
