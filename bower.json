@@ -14,7 +14,7 @@
     "purescript-generics": "^1.0.0",
     "purescript-signal": "git@github.com:eskimor/purescript-signal.git#purescript-test-unit-7.0.0",
     "purescript-maps": "^1.0.0",
-    "purescript-websocket-simple": "git@github.com:eskimor/purescript-websocket-simple.git#psc-0.9.1",
+    "purescript-websocket-simple": "git@github.com:eskimor/purescript-websocket-simple.git#local",
     "purescript-var": "git@github.com:eskimor/purescript-var.git#psc-0.9.1",
     "purescript-refs": "^1.0.0",
     "purescript-argonaut-generic-codecs": "^1.0.0",
