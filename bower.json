@@ -8,20 +8,22 @@
   ],
   "dependencies": {
     "purescript-console": "^1.0.0",
-    "purescript-dom" : "^1.1.0",
+    "purescript-dom": "^1.1.0",
     "purescript-maybe": "^1.0.0",
     "purescript-tuples": "^1.0.0",
     "purescript-generics": "^1.0.0",
-    "purescript-signal": "git@github.com:eskimor/purescript-signal.git#purescript-test-unit-7.0.0",
+    "purescript-signal": "^6.0",
     "purescript-maps": "^1.0.0",
-    "purescript-websocket-simple": "git@github.com:eskimor/purescript-websocket-simple.git#local",
-    "purescript-var": "git@github.com:eskimor/purescript-var.git#psc-0.9.1",
+    "purescript-websocket-simple": "^0.4.0",
+    "purescript-var": "^0.2.0",
     "purescript-refs": "^1.0.0",
     "purescript-argonaut-generic-codecs": "^1.0.0",
     "purescript-profunctor-lenses": "^1.0.0",
     "purescript-prelude": "^1.0.0",
     "purescript-bifunctors": "^1.0.0",
-    "purescript-partial": "^1.1.2",
-    "purescript-generics": "^1.0.0"
+    "purescript-partial": "^1.1.2"
+  },
+  "resolutions": {
+    "purescript-dom": "^1.1.0"
   }
 }
