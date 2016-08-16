@@ -5,13 +5,16 @@ module Servant.Subscriber (
   , unsubscribe
   , close
   , Subscriber
-  , NotifyEvent (..)
+  , ResourceEvent (..)
+  , SignalEvent (..)
   , SubscriberEff
   ) where
 
 import Prelude
 import Control.Monad.Eff.Ref as Ref
 import Control.Monad.Eff.Var as Var
+import DOM.HTML.Event.ErrorEvent as ErrorEvent
+import DOM.Websocket.Event.CloseEvent as CloseEvent
 import Data.List as List
 import Data.StrMap as StrMap
 import Servant.Subscriber.Response as Resp
@@ -22,8 +25,6 @@ import Control.Monad.Eff.Exception (Error, EXCEPTION, catchException)
 import Control.Monad.Eff.Ref (Ref, REF, modifyRef, writeRef, newRef, readRef)
 import DOM.Event.Types (Event)
 import DOM.Websocket.Event.Types (CloseEvent, MessageEvent)
-import DOM.Websocket.Event.CloseEvent as CloseEvent
-import DOM.HTML.Event.ErrorEvent as ErrorEvent
 import Data.Argonaut.Generic.Aeson (encodeJson, decodeJson)
 import Data.Argonaut.Parser (jsonParser)
 import Data.Argonaut.Printer (printJson)
@@ -38,7 +39,7 @@ import Data.Maybe (Maybe(Nothing, Just))
 import Data.StrMap (StrMap)
 import Data.Tuple (fst)
 import Servant.Subscriber.Request (HttpRequest(HttpRequest), Request(Subscribe, Unsubscribe))
-import Servant.Subscriber.Response (Response)
+import Servant.Subscriber.Response (HttpResponse)
 import Servant.Subscriber.Types (Path(Path))
 import Unsafe.Coerce (unsafeCoerce)
 import WebSocket (ReadyState(Open), Code(Code), WEBSOCKET, Connection(..), newWebSocket, Message(..))
@@ -46,23 +47,36 @@ import WebSocket (ReadyState(Open), Code(Code), WEBSOCKET, Connection(..), newWe
 
 type SubscriberEff eff = Eff (ref :: REF, ws :: WEBSOCKET, err :: EXCEPTION | eff)
 
+type Config = {
+    url    :: String
+  , notify :: forall eff. ResourceEvent        -> SubscriberEff eff Unit
+  , signal :: forall eff. SignalEvent          -> SubscriberEff eff Unit
+  }
 
 type SubscriberImpl = {
     subscriptions :: Ref Subscriptions
-  , url :: WS.URL
-  , notify :: forall eff. NotifyEvent -> SubscriberEff eff Unit
-  , connection :: Ref (Maybe Connection)
+  , url           :: WS.URL
+  , notify        :: forall eff. ResourceEvent -> SubscriberEff eff Unit
+  , signal        :: forall eff. SignalEvent   -> SubscriberEff eff Unit
+  , connection    :: Ref (Maybe Connection)
   }
 
 
 newtype Subscriber = Subscriber SubscriberImpl
 
-data NotifyEvent = NotifyEvent Response
-    | ParseError String -- We could not parse the server's response
-    | WebSocketError String
-    | WebSocketClosed String
+data ResourceEvent = Modified Path String
+                   | Deleted Path
 
-derive instance genericNotifyEvent :: Generic NotifyEvent
+derive instance genericResourceEvent :: Generic ResourceEvent
+
+-- | Errors and other signals, that are not specific to a particular resource
+--   or very unlikely to be dealt with on a per-resource base.
+data SignalEvent = WebSocketError String
+                 | WebSocketClosed String
+                 | HttpRequestFailed HttpRequest HttpResponse
+                 | ParseError String -- |< Server response could not be parsed/ Server could not parse our request.
+
+derive instance genericSignalEvent :: Generic SignalEvent
 
 type Subscriptions = StrMap Subscription
 
@@ -85,14 +99,15 @@ derive instance eqSubscriptionState :: Eq SubscriptionState
 coerceEffects :: forall eff0 eff1 a. Eff eff0 a -> Eff eff1 a
 coerceEffects = unsafeCoerce
 
-makeSubscriber :: forall eff. String -> (NotifyEvent -> SubscriberEff eff Unit) -> SubscriberEff eff Subscriber
-makeSubscriber url h = do
+makeSubscriber :: forall eff. Config -> SubscriberEff eff Subscriber
+makeSubscriber c = do
       connRef <- newRef Nothing
       subscriptions <- Ref.newRef StrMap.empty
       pure $ Subscriber {
                     subscriptions : subscriptions
-                  , url : WS.URL url
-                  , notify : coerceEffects <<< h
+                  , url : WS.URL c.url
+                  , notify : coerceEffects <<< c.notify
+                  , signal : coerceEffects <<< c.signal
                   , connection : connRef
                   }
 
@@ -135,7 +150,9 @@ tryRealize impl = do
 realize :: forall eff. Connection -> SubscriberImpl -> SubscriberEff eff Unit
 realize (Connection conn) impl = do
       ordered <- List.filter ((_ == Ordered) <<< _.state) <<< StrMap.values <$> Ref.readRef impl.subscriptions
-      let mkMsg = Message <<< printJson <<< encodeJson
+      let
+        mkMsg :: Request -> Message
+        mkMsg = Message <<< printJson <<< encodeJson
       let msgs = map (mkMsg <<< _.req) ordered
       sequence_ $ map (coerceEffects <<< conn.send) msgs
     --  modifyRef impl.subscriptions $ over (mapped <<< state <<< match Requested) (const Sent) -- Does not work currently.
@@ -172,7 +189,7 @@ closeHandler impl ev = do
         else do
           modifyRef impl.subscriptions $ updateSubscriptions
           makeConnection impl
-      impl.notify $ WebSocketClosed ("code: " <> (show <<< CloseEvent.code) ev <> ", reason: " <> CloseEvent.reason ev)
+      impl.signal $ WebSocketClosed ("code: " <> (show <<< CloseEvent.code) ev <> ", reason: " <> CloseEvent.reason ev)
   where
     isUnsubscribe :: Request -> Boolean
     isUnsubscribe (Unsubscribe _) = true
@@ -187,7 +204,7 @@ closeHandler impl ev = do
 
 errorHandler :: forall eff. SubscriberImpl -> Event -> SubscriberEff eff Unit
 errorHandler impl ev = do
-      impl.notify $ WebSocketError ((ErrorEvent.message <<< unsafeCoerce) ev)
+      impl.signal $ WebSocketError ((ErrorEvent.message <<< unsafeCoerce) ev)
       tryRealize impl -- Something went wrong - retry. (TODO: Probably better with some timeout!)
 
 
@@ -196,15 +213,22 @@ messageHandler impl msgEvent =  do
       let msg = WS.runMessage <<< WS.runMessageEvent $ msgEvent
       let eDecoded = decodeJson <=< jsonParser $ msg
       case eDecoded of
-        Left err -> impl.notify $ ParseError (err <> ", input: '" <> msg <> "'")
+        Left err -> impl.signal $ ParseError (err <> ", input: '" <> msg <> "'")
         Right resp -> do
             modifyRef impl.subscriptions $ case resp of
-                Resp.Subscribed path   -> at (pathToKey path) <<< _Just <<< state .~ Confirmed
-                Resp.Deleted path      -> at (pathToKey path) .~ (Nothing :: Maybe Subscription)
-                Resp.Unsubscribed path -> at (pathToKey path) .~ (Nothing :: Maybe Subscription)
-                Resp.Modified _ _      -> id
-                Resp.RequestError _    -> id
-            impl.notify $ NotifyEvent resp
+                Resp.Subscribed path          -> at (pathToKey path) <<< _Just <<< state .~ Confirmed
+                Resp.Deleted path             -> at (pathToKey path) .~ (Nothing :: Maybe Subscription)
+                Resp.Unsubscribed path        -> at (pathToKey path) .~ (Nothing :: Maybe Subscription)
+                Resp.Modified _ _             -> id
+                Resp.HttpRequestFailed req' _ -> at (reqToKey req') .~ (Nothing :: Maybe Subscription)
+                Resp.ParseError               -> id
+            case resp of
+              Resp.Modified path val            -> impl.notify $ Modified path val
+              Resp.Deleted  path                -> impl.notify $ Deleted path
+              Resp.HttpRequestFailed req' resp' -> impl.signal $ HttpRequestFailed req' resp'
+              Resp.ParseError                   -> impl.signal $ ParseError "Server could not parse our request!"
+              Resp.Subscribed _                 -> pure unit
+              Resp.Unsubscribed _               -> pure unit
 
 reqToPath :: HttpRequest -> Path
 reqToPath (HttpRequest r) = r.httpPath

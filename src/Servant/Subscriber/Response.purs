@@ -11,10 +11,11 @@ import Data.Generic (class Generic)
 
 data Response =
     Subscribed Path
-  | Modified Path HttpResponse
+  | Modified Path String
   | Deleted Path
   | Unsubscribed Path
-  | RequestError RequestError
+  | HttpRequestFailed HttpRequest HttpResponse
+  | ParseError 
 
 derive instance genericResponse :: Generic Response
 
@@ -34,12 +35,4 @@ data Status =
     }
 
 derive instance genericStatus :: Generic Status
-
-data RequestError =
-    ParseError 
-  | HttpRequestFailed HttpRequest HttpResponse
-  | NoSuchSubscription Path
-  | AlreadySubscribed Path
-
-derive instance genericRequestError :: Generic RequestError
 
