@@ -41,27 +41,22 @@ type SubscriberEff eff = Eff (ref :: REF, ws :: WEBSOCKET, err :: EXCEPTION | ef
 type SubscriberImpl = {
     subscriptions :: Ref Subscriptions
   , url           :: WS.URL
-  , notify        :: forall eff. ResourceEvent -> SubscriberEff eff Unit
-  , signal        :: forall eff. SignalEvent   -> SubscriberEff eff Unit
+  , notify        :: forall eff. Notification -> SubscriberEff eff Unit
   , connection    :: Ref (Maybe Connection)
   }
 
 
 newtype Subscriber = Subscriber SubscriberImpl
 
-data ResourceEvent = Modified Path String
-                   | Deleted Path
+data Notification = Modified Path String
+           | Deleted Path
+           | WebSocketError String
+           | WebSocketClosed String
+           | HttpRequestFailed HttpRequest HttpResponse
+           | ParseError String -- |< Server response could not be parsed/ Server could not parse our request.
 
-derive instance genericResourceEvent :: Generic ResourceEvent
+derive instance genericNotification :: Generic Notification
 
--- | Errors and other signals, that are not specific to a particular resource
---   or very unlikely to be dealt with on a per-resource base.
-data SignalEvent = WebSocketError String
-                 | WebSocketClosed String
-                 | HttpRequestFailed HttpRequest HttpResponse
-                 | ParseError String -- |< Server response could not be parsed/ Server could not parse our request.
-
-derive instance genericSignalEvent :: Generic SignalEvent
 
 type Subscriptions = StrMap Subscription
 
@@ -138,7 +133,7 @@ closeHandler impl ev = do
         else do
           modifyRef impl.subscriptions $ updateSubscriptions
           makeConnection impl
-      impl.signal $ WebSocketClosed ("code: " <> (show <<< CloseEvent.code) ev <> ", reason: " <> CloseEvent.reason ev)
+      impl.notify $ WebSocketClosed ("code: " <> (show <<< CloseEvent.code) ev <> ", reason: " <> CloseEvent.reason ev)
   where
     isUnsubscribe :: Request -> Boolean
     isUnsubscribe (Unsubscribe _) = true
@@ -153,7 +148,7 @@ closeHandler impl ev = do
 
 errorHandler :: forall eff. SubscriberImpl -> Event -> SubscriberEff eff Unit
 errorHandler impl ev = do
-      impl.signal $ WebSocketError ((ErrorEvent.message <<< unsafeCoerce) ev)
+      impl.notify $ WebSocketError ((ErrorEvent.message <<< unsafeCoerce) ev)
       tryRealize impl -- Something went wrong - retry. (TODO: Probably better with some timeout!)
 
 
@@ -162,7 +157,7 @@ messageHandler impl msgEvent =  do
       let msg = WS.runMessage <<< WS.runMessageEvent $ msgEvent
       let eDecoded = decodeJson <=< jsonParser $ msg
       case eDecoded of
-        Left err -> impl.signal $ ParseError (err <> ", input: '" <> msg <> "'")
+        Left err -> impl.notify $ ParseError (err <> ", input: '" <> msg <> "'")
         Right resp -> do
             modifyRef impl.subscriptions $ case resp of
                 Resp.Subscribed path          -> at (pathToKey path) <<< _Just <<< state .~ Confirmed
@@ -174,8 +169,8 @@ messageHandler impl msgEvent =  do
             case resp of
               Resp.Modified path val            -> impl.notify $ Modified path val
               Resp.Deleted  path                -> impl.notify $ Deleted path
-              Resp.HttpRequestFailed req' resp' -> impl.signal $ HttpRequestFailed req' resp'
-              Resp.ParseError                   -> impl.signal $ ParseError "Server could not parse our request!"
+              Resp.HttpRequestFailed req' resp' -> impl.notify $ HttpRequestFailed req' resp'
+              Resp.ParseError                   -> impl.notify $ ParseError "Server could not parse our request!"
               Resp.Subscribed _                 -> pure unit
               Resp.Unsubscribed _               -> pure unit
 

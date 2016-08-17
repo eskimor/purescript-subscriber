@@ -23,14 +23,12 @@ import WebSocket as WS
 import Servant.Subscriber.Internal
 import Servant.Subscriber.Internal ( Subscriber
                                    , SubscriberEff
-                                   , ResourceEvent (..)
-                                   , SignalEvent (..)
+                                   , Notification (..)
                                    ) as Internal
 
 type Config = {
     url    :: String
-  , notify :: forall eff. ResourceEvent        -> SubscriberEff eff Unit
-  , signal :: forall eff. SignalEvent          -> SubscriberEff eff Unit
+  , notify :: forall eff. Notification -> SubscriberEff eff Unit
   }
 
 
@@ -42,7 +40,6 @@ makeSubscriber c = do
                     subscriptions : subscriptions
                   , url : WS.URL c.url
                   , notify : coerceEffects <<< c.notify
-                  , signal : coerceEffects <<< c.signal
                   , connection : connRef
                   }
 
