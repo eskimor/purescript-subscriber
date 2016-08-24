@@ -1,68 +1,72 @@
 module Servant.Subscriber (
     Config
   , module Internal
-  , makeSubscriber
+  , makeConnection
   , subscribe
   , unsubscribe
   , close
   ) where
 
+import Servant.Subscriber.Internal
+import Control.Monad.Eff.Ref as Ref
+import Data.StrMap as StrMap
+import WebSocket as WS
+import WebSocket as WS
 import Control.Bind ((<=<))
 import Control.Monad.Eff.Ref (modifyRef, readRef, writeRef, newRef)
-import Control.Monad.Eff.Ref as Ref
 import Data.Lens (_Just, (.~))
 import Data.Lens.At (at)
 import Data.Maybe (Maybe(Nothing, Just))
-import Data.StrMap as StrMap
+import Data.StrMap (StrMap)
 import Prelude (Unit, bind, unit, pure, (<<<), ($))
+import Servant.Subscriber.Internal (Connection, SubscriberEff, Notification(..)) as Internal
 import Servant.Subscriber.Request (HttpRequest, Request(Subscribe, Unsubscribe))
 import Servant.Subscriber.Types (Path)
-import WebSocket (Code(Code), Connection(Connection))
-import WebSocket as WS
+import WebSocket (Code(Code))
 
-import Servant.Subscriber.Internal
-import Servant.Subscriber.Internal ( Subscriber
-                                   , SubscriberEff
-                                   , Notification (..)
-                                   ) as Internal
-
-type Config = {
+type Config eff a = {
     url    :: String
-  , notify :: forall eff. Notification -> SubscriberEff eff Unit
+  , callback ::  a -> SubscriberEff eff Unit
+  , notify ::  Notification -> SubscriberEff eff Unit
   }
 
 
-makeSubscriber :: forall eff. Config -> SubscriberEff eff Subscriber
-makeSubscriber c = do
+makeConnection :: forall eff a. Config eff a -> SubscriberEff eff (Connection eff a)
+makeConnection c = do
       connRef <- newRef Nothing
-      subscriptions <- Ref.newRef StrMap.empty
-      pure $ Subscriber {
-                    subscriptions : subscriptions
-                  , url : WS.URL c.url
-                  , notify : coerceEffects <<< c.notify
-                  , connection : connRef
-                  }
+      orders <-  Ref.newRef StrMap.empty
+      pure $ {
+          orders : orders
+        , url : WS.URL c.url
+        , callback :  c.callback
+        , notify :  c.notify
+        , connection : connRef
+        }
 
 -- | Drop all subscriptions and close connection.
-close :: forall eff. Subscriber -> SubscriberEff eff Unit
-close (Subscriber impl) = do
-      writeRef impl.subscriptions StrMap.empty
+close :: forall eff a. Connection eff a -> SubscriberEff eff Unit
+close impl = do
+      writeRef impl.orders StrMap.empty
       mConn <- readRef impl.connection
       case mConn of
         Nothing -> pure unit
-        Just (Connection conn) -> conn.close' (Code 1000) Nothing
+        Just (WS.Connection conn) -> conn.close' (Code 1000) Nothing
 
-subscribe :: forall eff. HttpRequest -> Subscriber -> SubscriberEff eff Unit
-subscribe request (Subscriber impl) = do
-      modifyRef impl.subscriptions $ at (reqToKey request) .~ Just { state : Ordered, req : Subscribe request }
+subscribe :: forall eff a. HttpRequest -> ToUserType a -> Connection eff a -> SubscriberEff eff Unit
+subscribe request parseResponse impl = do
+      modifyRef impl.orders $ at (makeOrderKey request) .~ Just { state : Ordered
+                                                                   , req : Subscribe request
+                                                                   , parseResponse : parseResponse
+                                                                   }
       tryRealize impl
 
-unsubscribe :: forall eff. Path -> Subscriber -> SubscriberEff eff Unit
-unsubscribe p (Subscriber impl) = do
+unsubscribe :: forall eff a. HttpRequest -> Connection eff a -> SubscriberEff eff Unit
+unsubscribe req' impl = do
       mc <- readRef impl.connection
       case mc of
-        Nothing -> modifyRef impl.subscriptions $ StrMap.delete (pathToKey p)
+        Nothing -> modifyRef impl.orders $ StrMap.delete (makeOrderKey req')
         Just c -> do
-          modifyRef impl.subscriptions $ at (pathToKey p) <<< _Just .~ { req : Unsubscribe p, state : Ordered }
+          let key = makeOrderKey req'
+          modifyRef impl.orders $ StrMap.update (Just <<< _ { req = Unsubscribe req', state = Ordered}) key 
           tryRealize impl
 
