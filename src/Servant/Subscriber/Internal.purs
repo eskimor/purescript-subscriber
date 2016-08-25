@@ -3,10 +3,12 @@ module Servant.Subscriber.Internal where
 import Prelude
 import Control.Monad.Eff.Ref as Ref
 import Control.Monad.Eff.Var as Var
+import Control.Monad.ST as ST
 import DOM.HTML.Event.ErrorEvent as ErrorEvent
 import DOM.Websocket.Event.CloseEvent as CloseEvent
 import Data.List as List
 import Data.StrMap as StrMap
+import Data.StrMap.ST as SM
 import Servant.Subscriber.Response as Resp
 import WebSocket as WS
 import Control.Bind ((<=<))
@@ -21,7 +23,8 @@ import Data.Argonaut.Parser (jsonParser)
 import Data.Argonaut.Printer (printJson)
 import Data.Bifunctor (lmap)
 import Data.Either (Either(Right, Left))
-import Data.Foldable (elem, traverse_, sequence_, intercalate, foldl)
+import Data.Foldable (traverse_, sequence_, elem, intercalate, foldl)
+import Data.Function.Uncurried (Fn4)
 import Data.Generic (gShow, gEq, gCompare, class Generic)
 import Data.Lens ((^.), view, prism, (.~), _Just, _2)
 import Data.Lens.At (at)
@@ -29,7 +32,7 @@ import Data.Lens.Lens (lens)
 import Data.Lens.Types (PrismP, LensP)
 import Data.List (List, filter)
 import Data.Maybe (Maybe(Nothing, Just))
-import Data.StrMap (StrMap)
+import Data.StrMap (thawST, pureST, StrMap)
 import Data.Tuple (Tuple(Tuple), fst)
 import Partial.Unsafe (unsafeCrashWith)
 import Servant.PureScript.Util (reportError)
@@ -38,7 +41,6 @@ import Servant.Subscriber.Response (HttpResponse)
 import Servant.Subscriber.Types (Path(Path))
 import Unsafe.Coerce (unsafeCoerce)
 import WebSocket (WEBSOCKET, Message(Message), ReadyState(Open), newWebSocket)
-
 
 type SubscriberEff eff = Eff (ref :: REF, ws :: WEBSOCKET, err :: EXCEPTION | eff)
 
@@ -58,6 +60,14 @@ type OrderKey = String
 makeOrderKey :: HttpRequest -> OrderKey
 makeOrderKey = gShow
 
+-- | Information about a subscription:
+--   What to subscribe and whom to respond to.
+type Subscription a = {
+    req :: HttpRequest
+  , parseResponses :: List (ToUserType a)
+  }
+
+
 data Notification = WebSocketError String
            | WebSocketClosed String
            | HttpRequestFailed HttpRequest HttpResponse
@@ -75,7 +85,7 @@ derive instance eqSubscriptionState :: Eq SubscriptionState
 
 type Order a = {
     req :: Request
-  , parseResponse :: ToUserType a
+  , parseResponses :: List (ToUserType a)
   , state :: SubscriptionState
   }
 
@@ -221,13 +231,16 @@ doCallback req' res impl = do
     order' = case StrMap.lookup (makeOrderKey req') orders' of
       Nothing -> unsafeCrashWith $ "Received a message for an unregistered handler: " <> gShow req'
       Just o -> o
-    parser = order'.parseResponse
-    eitherVal = case res of
-      Nothing -> parser Nothing
-      Just str -> doDecode parser str
-  case eitherVal of
+    parsers = order'.parseResponses
+    eitherVals :: List (Either String a)
+    eitherVals = case res of
+      Nothing ->  map (_ $ Nothing) parsers
+      Just str -> flip doDecode str <$> parsers
+    handleEitherVal :: Either String a -> SubscriberEff eff Unit
+    handleEitherVal eitherVal =case eitherVal of
       Right decoded -> impl.callback decoded
       Left err -> impl.notify $ ParseError err
+  traverse_ handleEitherVal eitherVals
 
 doDecode :: forall a. ToUserType a -> String -> Either String a
 doDecode parser str = do
@@ -255,3 +268,12 @@ getHttpReq req' = case req' of
   Unsubscribe hreq -> hreq
 
 runHttpRequest (HttpRequest req') = req'
+
+ -- Copied from Data.StrMap (not exported):
+mutate :: forall a b. (forall h e. SM.STStrMap h a -> Eff (st :: ST.ST h | e) b) -> StrMap a -> StrMap a
+mutate f m = pureST (do
+  s <- thawST m
+  f s
+  pure s)
+
+foreign import _lookup :: forall a z. Fn4 z (a -> z) String (StrMap a) z
