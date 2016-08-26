@@ -8,20 +8,14 @@ module Servant.Subscriber (
 
 
 import Prelude
-import Data.StrMap as StrMap
-import Data.StrMap.ST as SM
+
+
 import Servant.Subscriber.Subscriptions as Subs
-import Control.Monad.Eff (Eff)
 import Control.Monad.Eff.Ref (newRef, writeRef, readRef, Ref)
-import Control.Monad.ST (ST)
-import Data.Foldable (traverse_)
 import Data.Monoid (mempty)
-import Data.StrMap (StrMap)
-import Data.StrMap.ST (STStrMap)
-import Servant.Subscriber.Connection (ToUserType, realize, subscribeAll, unsubscribe, SubscriberEff, Config, Connection, makeConnection, unsubscribeAll)
+import Servant.Subscriber.Connection (SubscriberEff, Connection, Config, realize, subscribeAll, unsubscribeAll, makeConnection)
 import Servant.Subscriber.Connection (Config) as Exports
-import Servant.Subscriber.Internal (mutate)
-import Servant.Subscriber.Internal (ToUserType) as Exports
+import Servant.Subscriber.Internal (ToUserType, SubscriberEff) as Exports
 import Servant.Subscriber.Subscriptions (Subscriptions, diffSubscriptions)
 import Servant.Subscriber.Subscriptions (Subscriptions, makeSubscriptions) as Exports
 
