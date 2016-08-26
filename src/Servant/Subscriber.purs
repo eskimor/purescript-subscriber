@@ -1,101 +1,64 @@
+-- | High level declarative interface for servant-subscriber.
 module Servant.Subscriber (
-    Config
-  , module Internal
-  , makeConnection
-  , subscribe
-  , unsubscribe
-  , close
-  ) where
+  Subscriber
+  , makeSubscriber
+  , deploy
+  , getConnection
+  , module Exports )where
 
-import Servant.Subscriber.Internal
-import Control.Monad.Eff.Ref as Ref
+
+import Prelude
 import Data.StrMap as StrMap
-import Servant.Subscriber.Subscriptions as Subscriptions
-import WebSocket as WS
-import WebSocket as WS
-import Control.Bind ((<=<))
+import Data.StrMap.ST as SM
+import Servant.Subscriber.Subscriptions as Subs
 import Control.Monad.Eff (Eff)
-import Control.Monad.Eff.Ref (modifyRef, readRef, writeRef, newRef)
+import Control.Monad.Eff.Ref (newRef, writeRef, readRef, Ref)
 import Control.Monad.ST (ST)
-import Data.Lens (_Just, (.~))
-import Data.Lens.At (at)
-import Data.List (List(Cons, Nil))
-import Data.Maybe (Maybe(Nothing, Just))
+import Data.Foldable (traverse_)
+import Data.Monoid (mempty)
 import Data.StrMap (StrMap)
 import Data.StrMap.ST (STStrMap)
-import Prelude (Unit, bind, unit, pure, (<<<), ($))
-import Servant.Subscriber.Internal (Connection, SubscriberEff, Notification(..)) as Internal
-import Servant.Subscriber.Request (HttpRequest, Request(Subscribe, Unsubscribe))
-import Servant.Subscriber.Subscriptions (Subscriptions)
-import Servant.Subscriber.Types (Path)
-import WebSocket (Code(Code))
-import Data.StrMap.ST as SM
-import Data.List as List
+import Servant.Subscriber.Connection (ToUserType, realize, subscribeAll, unsubscribe, SubscriberEff, Config, Connection, makeConnection, unsubscribeAll)
+import Servant.Subscriber.Connection (Config) as Exports
+import Servant.Subscriber.Internal (mutate)
+import Servant.Subscriber.Internal (ToUserType) as Exports
+import Servant.Subscriber.Subscriptions (Subscriptions, diffSubscriptions)
+import Servant.Subscriber.Subscriptions (Subscriptions, makeSubscriptions) as Exports
 
-type Config eff a = {
-    url    :: String
-  , callback ::  a -> SubscriberEff eff Unit
-  , notify ::  Notification -> SubscriberEff eff Unit
+newtype Subscriber eff a = Subscriber (SubscriberImpl eff a)
+
+type SubscriberImpl eff a = {
+    connection :: Connection eff a
+  , old :: Ref (Subscriptions a)
   }
 
+makeSubscriber :: forall eff a. Config eff a -> SubscriberEff eff (Subscriber eff a)
+makeSubscriber c = do
+  conn <- makeConnection c
+  old' <- newRef mempty
+  pure $ Subscriber {
+    connection : conn
+  , old : old'
+  }
 
-makeConnection :: forall eff a. Config eff a -> SubscriberEff eff (Connection eff a)
-makeConnection c = do
-      connRef <- newRef Nothing
-      orders <-  Ref.newRef StrMap.empty
-      pure $ {
-          orders : orders
-        , url : WS.URL c.url
-        , callback :  c.callback
-        , notify :  c.notify
-        , connection : connRef
-        }
-
--- | Drop all subscriptions and close connection.
-close :: forall eff a. Connection eff a -> SubscriberEff eff Unit
-close impl = do
-      writeRef impl.orders StrMap.empty
-      mConn <- readRef impl.connection
-      case mConn of
-        Nothing -> pure unit
-        Just (WS.Connection conn) -> conn.close' (Code 1000) Nothing
-
-subscribe :: forall eff a. Subscription a -> Connection eff a -> SubscriberEff eff Unit
-subscribe sub impl = do
-      modifyRef impl.orders
-        $ StrMap.alter (Just <<< updateOrder sub) (makeOrderKey sub.req)
-      tryRealize impl
-
-subscribeAll :: forall eff a. Subscriptions a -> Connection eff a -> SubscriberEff eff Unit
-subscribeAll subs impl = do
-    let subsList = Subscriptions.toList subs
-    modifyRef impl.orders $ insertSubscriptions subsList
-  where
-    insertSubscriptions :: List (Subscription a) -> Orders a -> Orders a
-    insertSubscriptions subs = mutate $ \ orders' -> List.foldM mutSubscribe orders' subs
-
-mutSubscribe :: forall a h r. STStrMap h (Order a) -> Subscription a -> Eff (st :: ST h | r) (STStrMap h (Order a))
-mutSubscribe orders sub = do
-  old <- SM.peek orders $ makeOrderKey sub.req
-  let new = updateOrder sub old
-  SM.poke orders (makeOrderKey sub.req) new
-
-unsubscribe :: forall eff a. HttpRequest -> Connection eff a -> SubscriberEff eff Unit
-unsubscribe req' impl = do
-      mc <- readRef impl.connection
-      case mc of
-        Nothing -> modifyRef impl.orders $ StrMap.delete (makeOrderKey req')
-        Just c -> do
-          let key = makeOrderKey req'
-          modifyRef impl.orders $ StrMap.update (Just <<< _ { req = Unsubscribe req', state = Ordered}) key
-          tryRealize impl
+-- | Get access to the low-level Connection.
+getConnection :: forall eff a. Subscriber eff a -> Connection eff a
+getConnection (Subscriber impl) = impl.connection
 
 
-updateOrder :: forall a. Subscription a -> Maybe (Order a) -> Order a
-updateOrder sub orig = case orig of
-    Nothing -> {
-        state : Ordered
-      , req : Subscribe sub.req
-      , parseResponses : sub.parseResponses
-      }
-    Just o -> o { parseResponses = sub.parseResponses }
+-- | Deploy a given set of Subscriptions.
+--
+--   This function takes care of unsubscribing subscriptions which are no longer present adds any new ones, updates
+--   already existing ones and also calls realize for actually sending Subscribe/Unsubscribe commands to the server.
+deploy :: forall eff a. Subscriptions a -> Subscriber eff a -> SubscriberEff eff Unit
+deploy subs (Subscriber impl)= do
+  old' <- readRef impl.old
+  let
+    forUnsubscribe = map (_.req) <<< Subs.toList $ diffSubscriptions old' subs
+  unsubscribeAll forUnsubscribe impl.connection
+  subscribeAll (Subs.toList subs) impl.connection
+  realize impl.connection
+  writeRef impl.old subs
+
+
+

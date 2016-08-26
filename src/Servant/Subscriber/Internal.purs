@@ -33,6 +33,7 @@ import Data.Lens.Types (PrismP, LensP)
 import Data.List (List, filter)
 import Data.Maybe (Maybe(Nothing, Just))
 import Data.StrMap (thawST, pureST, StrMap)
+import Data.StrMap.ST (STStrMap)
 import Data.Tuple (Tuple(Tuple), fst)
 import Partial.Unsafe (unsafeCrashWith)
 import Servant.PureScript.Util (reportError)
@@ -41,6 +42,7 @@ import Servant.Subscriber.Response (HttpResponse)
 import Servant.Subscriber.Types (Path(Path))
 import Unsafe.Coerce (unsafeCoerce)
 import WebSocket (WEBSOCKET, Message(Message), ReadyState(Open), newWebSocket)
+import Data.StrMap.ST.Unsafe as ST
 
 type SubscriberEff eff = Eff (ref :: REF, ws :: WEBSOCKET, err :: EXCEPTION | eff)
 
@@ -100,20 +102,21 @@ state = lens _.state (\r -> r { state = _ })
 coerceEffects :: forall eff0 eff1 a. Eff eff0 a -> Eff eff1 a
 coerceEffects = unsafeCoerce
 
-tryRealize :: forall eff a. Connection eff a -> SubscriberEff eff Unit
-tryRealize impl = do
+-- | Call this function to actually send requests to the server.
+realize :: forall eff a. Connection eff a -> SubscriberEff eff Unit
+realize impl = do
       mc <- readRef impl.connection
       case mc of
           Nothing -> makeConnection impl
           Just c'@(WS.Connection c) -> do
             rdy <- Var.get c.readyState
             case rdy of
-              Open -> realize c' impl
+              Open -> sendRequests c' impl
               _    -> pure unit
 
 -- | Takes care of actually subscribing stuff.
-realize :: forall eff a. WS.Connection -> Connection eff a -> SubscriberEff eff Unit
-realize (WS.Connection conn) impl = do
+sendRequests :: forall eff a. WS.Connection -> Connection eff a -> SubscriberEff eff Unit
+sendRequests (WS.Connection conn) impl = do
       ordered <- List.filter ((_ == Ordered) <<< _.state) <<< StrMap.values <$> Ref.readRef impl.orders
       let
         mkMsg :: Request -> Message
@@ -121,7 +124,7 @@ realize (WS.Connection conn) impl = do
 
         msgs = map (mkMsg <<< _.req) ordered
 
-      sequence_ $ map (coerceEffects <<< conn.send) msgs
+      sequence_ $ map conn.send msgs
     --  modifyRef impl.subscriptions $ over (mapped <<< state <<< match Requested) (const Sent) -- Does not work currently.
     --  modifyRef impl.subscriptions $ traverse <<< state <<< filtered (_ == Ordered) .~ Sent -- Does not work currently
       modifyRef impl.orders $ map (\sub -> if sub.state == Ordered then sub { state = Sent } else sub)
@@ -145,7 +148,7 @@ makeConnection impl = do
 
 
 openHandler :: forall eff a. WS.Connection -> Connection eff a -> Event -> SubscriberEff eff Unit
-openHandler conn impl _ = realize conn impl
+openHandler conn impl _ = sendRequests conn impl
 
 closeHandler :: forall eff a. Connection eff a -> CloseEvent -> SubscriberEff eff Unit
 closeHandler impl ev = do
@@ -172,7 +175,7 @@ closeHandler impl ev = do
 errorHandler :: forall eff a. Connection eff a -> Event -> SubscriberEff eff Unit
 errorHandler impl ev = do
       impl.notify $ WebSocketError ((ErrorEvent.message <<< unsafeCoerce) ev)
-      tryRealize impl -- Something went wrong - retry. (TODO: Probably better with some timeout!)
+      realize impl -- Something went wrong - retry. (TODO: Probably better with some timeout!)
 
 
 messageHandler :: forall eff a. Connection eff a -> MessageEvent -> SubscriberEff eff Unit
@@ -270,10 +273,13 @@ getHttpReq req' = case req' of
 runHttpRequest (HttpRequest req') = req'
 
  -- Copied from Data.StrMap (not exported):
-mutate :: forall a b. (forall h e. SM.STStrMap h a -> Eff (st :: ST.ST h | e) b) -> StrMap a -> StrMap a
-mutate f m = pureST (do
-  s <- thawST m
+mutate :: forall a b. (forall h . SM.STStrMap h a -> Eff (st :: ST.ST h ) b) -> StrMap a -> StrMap a
+mutate f m = ST.pureST (do
+  s <- myThawST m
   f s
-  pure s)
+  ST.unsafeGet s)
 
 foreign import _lookup :: forall a z. Fn4 z (a -> z) String (StrMap a) z
+
+myThawST :: forall a h. StrMap a -> Eff ( st :: ST.ST h) (STStrMap h a)
+myThawST = unsafeCoerce thawST
