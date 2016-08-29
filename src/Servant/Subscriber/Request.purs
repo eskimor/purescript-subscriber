@@ -11,7 +11,7 @@ import Data.Generic (class Generic)
 
 data Request =
     Subscribe HttpRequest
-  | Unsubscribe Path
+  | Unsubscribe HttpRequest
 
 derive instance genericRequest :: Generic Request
 

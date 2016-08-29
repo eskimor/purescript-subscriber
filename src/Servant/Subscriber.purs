@@ -1,68 +1,58 @@
+-- | High level declarative interface for servant-subscriber.
 module Servant.Subscriber (
-    Config
-  , module Internal
+  Subscriber
   , makeSubscriber
-  , subscribe
-  , unsubscribe
-  , close
-  ) where
+  , deploy
+  , getConnection
+  , module Exports )where
 
-import Control.Bind ((<=<))
-import Control.Monad.Eff.Ref (modifyRef, readRef, writeRef, newRef)
-import Control.Monad.Eff.Ref as Ref
-import Data.Lens (_Just, (.~))
-import Data.Lens.At (at)
-import Data.Maybe (Maybe(Nothing, Just))
-import Data.StrMap as StrMap
-import Prelude (Unit, bind, unit, pure, (<<<), ($))
-import Servant.Subscriber.Request (HttpRequest, Request(Subscribe, Unsubscribe))
-import Servant.Subscriber.Types (Path)
-import WebSocket (Code(Code), Connection(Connection))
-import WebSocket as WS
 
-import Servant.Subscriber.Internal
-import Servant.Subscriber.Internal ( Subscriber
-                                   , SubscriberEff
-                                   , Notification (..)
-                                   ) as Internal
+import Prelude
 
-type Config = {
-    url    :: String
-  , notify :: forall eff. Notification -> SubscriberEff eff Unit
+
+import Servant.Subscriber.Subscriptions as Subs
+import Control.Monad.Eff.Ref (newRef, writeRef, readRef, Ref)
+import Data.Monoid (mempty)
+import Servant.Subscriber.Connection (SubscriberEff, Connection, Config, realize, subscribeAll, unsubscribeAll, makeConnection)
+import Servant.Subscriber.Connection (Config) as Exports
+import Servant.Subscriber.Internal (ToUserType, SubscriberEff) as Exports
+import Servant.Subscriber.Subscriptions (Subscriptions, diffSubscriptions)
+import Servant.Subscriber.Subscriptions (Subscriptions, makeSubscriptions) as Exports
+
+newtype Subscriber eff a = Subscriber (SubscriberImpl eff a)
+
+type SubscriberImpl eff a = {
+    connection :: Connection eff a
+  , old :: Ref (Subscriptions a)
   }
 
-
-makeSubscriber :: forall eff. Config -> SubscriberEff eff Subscriber
+makeSubscriber :: forall eff a. Config eff a -> SubscriberEff eff (Subscriber eff a)
 makeSubscriber c = do
-      connRef <- newRef Nothing
-      subscriptions <- Ref.newRef StrMap.empty
-      pure $ Subscriber {
-                    subscriptions : subscriptions
-                  , url : WS.URL c.url
-                  , notify : coerceEffects <<< c.notify
-                  , connection : connRef
-                  }
+  conn <- makeConnection c
+  old' <- newRef mempty
+  pure $ Subscriber {
+    connection : conn
+  , old : old'
+  }
 
--- | Drop all subscriptions and close connection.
-close :: forall eff. Subscriber -> SubscriberEff eff Unit
-close (Subscriber impl) = do
-      writeRef impl.subscriptions StrMap.empty
-      mConn <- readRef impl.connection
-      case mConn of
-        Nothing -> pure unit
-        Just (Connection conn) -> conn.close' (Code 1000) Nothing
+-- | Get access to the low-level Connection.
+getConnection :: forall eff a. Subscriber eff a -> Connection eff a
+getConnection (Subscriber impl) = impl.connection
 
-subscribe :: forall eff. HttpRequest -> Subscriber -> SubscriberEff eff Unit
-subscribe request (Subscriber impl) = do
-      modifyRef impl.subscriptions $ at (reqToKey request) .~ Just { state : Ordered, req : Subscribe request }
-      tryRealize impl
 
-unsubscribe :: forall eff. Path -> Subscriber -> SubscriberEff eff Unit
-unsubscribe p (Subscriber impl) = do
-      mc <- readRef impl.connection
-      case mc of
-        Nothing -> modifyRef impl.subscriptions $ StrMap.delete (pathToKey p)
-        Just c -> do
-          modifyRef impl.subscriptions $ at (pathToKey p) <<< _Just .~ { req : Unsubscribe p, state : Ordered }
-          tryRealize impl
+-- | Deploy a given set of Subscriptions.
+--
+--   This function takes care of unsubscribing subscriptions which are no longer present adds any new ones, updates
+--   already existing ones and also calls realize for actually sending Subscribe/Unsubscribe commands to the server.
+deploy :: forall eff a. Subscriptions a -> Subscriber eff a -> SubscriberEff eff Unit
+deploy subs (Subscriber impl)= do
+  old' <- readRef impl.old
+  let
+    forUnsubscribe = map (_.req) <<< Subs.toList $ diffSubscriptions old' subs
+  unsubscribeAll forUnsubscribe impl.connection
+  subscribeAll (Subs.toList subs) impl.connection
+  realize impl.connection
+  writeRef impl.old subs
+
+
 
