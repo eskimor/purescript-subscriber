@@ -53,6 +53,3 @@ deploy subs (Subscriber impl)= do
   subscribeAll (Subs.toList subs) impl.connection
   realize impl.connection
   writeRef impl.old subs
-
-
-
