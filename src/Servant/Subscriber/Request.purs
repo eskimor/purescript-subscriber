@@ -12,6 +12,8 @@ import Data.Generic (class Generic)
 data Request =
     Subscribe HttpRequest
   | Unsubscribe HttpRequest
+  | SetPongRequest HttpRequest
+  | SetCloseRequest HttpRequest
 
 derive instance genericRequest :: Generic Request
 

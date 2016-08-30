@@ -9,12 +9,15 @@ module Servant.Subscriber.Connection (
   , subscribeAll
   , unsubscribe
   , unsubscribeAll
+  , setPongRequest
+  , setCloseRequest
   , close
   ) where
 
 import Prelude
 import Control.Monad.Eff.Ref as Ref
 import Data.List as List
+import Data.Maybe (fromMaybe)
 import Data.StrMap as StrMap
 import Data.StrMap.ST as SM
 import Servant.Subscriber.Subscriptions as Subscriptions
@@ -33,7 +36,7 @@ import Data.StrMap.ST (STStrMap)
 import Prelude (unit, Unit, bind, pure, (<<<), ($))
 import Servant.Subscriber.Internal (SubscriptionState(Ordered), getHttpReq, OrderKey, Order, mutate, Orders, makeOrderKey, Subscription, Notification, Connection, SubscriberEff)
 import Servant.Subscriber.Internal (Connection, SubscriberEff, Notification(..), realize, ToUserType) as Exports
-import Servant.Subscriber.Request (HttpRequest, Request(Unsubscribe, Subscribe))
+import Servant.Subscriber.Request (HttpRequest, Request(Unsubscribe, Subscribe, SetPongRequest, SetCloseRequest))
 import Servant.Subscriber.Subscriptions (Subscriptions)
 import Servant.Subscriber.Types (Path)
 import WebSocket (Code(Code))
@@ -49,12 +52,16 @@ makeConnection :: forall eff a. Config eff a -> SubscriberEff eff (Connection ef
 makeConnection c = do
       connRef <- newRef Nothing
       orders <-  Ref.newRef StrMap.empty
+      pongRequest <- Ref.newRef Nothing
+      closeRequest <- Ref.newRef Nothing
       pure $ {
           orders : orders
         , url : WS.URL c.url
         , callback :  c.callback
         , notify :  c.notify
         , connection : connRef
+        , pongRequest : pongRequest
+        , closeRequest : closeRequest
         }
 
 -- | Drop all subscriptions and close connection.
@@ -74,7 +81,59 @@ subscribe sub impl = do
       modifyRef impl.orders
         $ StrMap.alter (Just <<< updateOrder sub) (makeOrderKey sub.req)
 
--- | Add all given subscriptions to orders for being subscribed. 
+-- | Unsubscribe a given request.
+--
+-- For actually sending requests to the server call `realize`.
+unsubscribe :: forall eff a. HttpRequest -> Connection eff a -> SubscriberEff eff Unit
+unsubscribe req' impl = do
+      mc <- readRef impl.connection
+      case mc of
+        Nothing -> modifyRef impl.orders $ StrMap.delete (makeOrderKey req')
+        Just c -> do
+          let key = makeOrderKey req'
+          modifyRef impl.orders $ StrMap.update (Just <<< _ { req = Unsubscribe req', state = Ordered}) key
+
+-- | Set a request which will be issued by the server on every websocket pong event.
+--
+--   Currently a pong request can not be unset, once set it is there for eternity
+--   you can only change it to something else. This of course can be fixed when needed!
+--
+--   WARNING: Don't ever subscribe a request and also call setPongRequest on it, this might not work as expected.
+--            (The Subscribed response is used in both cases, so one of the two requests might never get confirmed)
+--            Also never call setPongRequest and setCloseRequest on the same request. This restriction is mostly
+--            because of laziness and can of course also be fixed!.
+setPongRequest :: forall eff a. HttpRequest -> Connection eff a -> SubscriberEff eff Unit
+setPongRequest req' impl = do
+      prevReq <- readRef impl.pongRequest
+      modifyRef impl.orders $
+         deletePrevious (makeOrderKey <$> prevReq)
+         >>> StrMap.insert (makeOrderKey req') { req : SetPongRequest req'
+                                               , parseResponses : List.Nil
+                                               ,  state : Ordered
+                                               }
+      writeRef impl.pongRequest $ Just req'
+
+-- | Set a request which will be issued by the server when the websocket connection closes for any reason.
+--
+--   Currently a close request can not be unset, once set it is there for eternity
+--   you can only change it to something else. This of course can be fixed when needed!
+--
+--   WARNING: Don't ever subscribe a request and also call setCloseRequest on it, this might not work as expected.
+--            (The `Subscribed` response is used in both cases, so one of the two requests might never get confirmed)
+--            Also never call `setPongRequest` and `setCloseRequest` on the same request. This restriction is mostly
+--            because of my laziness and can of course also be fixed!.
+setCloseRequest :: forall eff a. HttpRequest -> Connection eff a -> SubscriberEff eff Unit
+setCloseRequest req' impl = do
+      prevReq <- readRef impl.closeRequest
+      modifyRef impl.orders $
+         deletePrevious (makeOrderKey <$> prevReq)
+         >>> StrMap.insert (makeOrderKey req') { req : SetCloseRequest req'
+                                               , parseResponses : List.Nil
+                                               ,  state : Ordered
+                                               }
+      writeRef impl.closeRequest $ Just req'
+
+-- | Add all given subscriptions to orders for being subscribed.
 --
 -- For actually sending requests to the server call `realize`.
 subscribeAll :: forall eff a. List (Subscription a) -> Connection eff a -> SubscriberEff eff Unit
@@ -117,17 +176,6 @@ mutUnsubscribe connActive orders key = if connActive
                                               }
                                         else SM.delete orders key
 
--- | Unsubscribe a given request.
---
--- For actually sending requests to the server call `realize`.
-unsubscribe :: forall eff a. HttpRequest -> Connection eff a -> SubscriberEff eff Unit
-unsubscribe req' impl = do
-      mc <- readRef impl.connection
-      case mc of
-        Nothing -> modifyRef impl.orders $ StrMap.delete (makeOrderKey req')
-        Just c -> do
-          let key = makeOrderKey req'
-          modifyRef impl.orders $ StrMap.update (Just <<< _ { req = Unsubscribe req', state = Ordered}) key
 
 
 updateOrder :: forall a. Subscription a -> Maybe (Order a) -> Order a
@@ -138,3 +186,8 @@ updateOrder sub orig = case orig of
       , parseResponses : sub.parseResponses
       }
     Just o -> o { parseResponses = sub.parseResponses }
+
+
+-- | Helper function for setPongRequest and setCloseRequest.
+deletePrevious :: forall a. Maybe OrderKey -> Orders a -> Orders a
+deletePrevious mKey = fromMaybe id (StrMap.delete <$> mKey)
