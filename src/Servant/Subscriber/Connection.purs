@@ -102,6 +102,8 @@ unsubscribe req' impl = do
 --            (The Subscribed response is used in both cases, so one of the two requests might never get confirmed)
 --            Also never call setPongRequest and setCloseRequest on the same request. This restriction is mostly
 --            because of laziness and can of course also be fixed!.
+--
+--   WARNING (another one): You have to call realize after calling this function, otherwise nothing will happen!
 setPongRequest :: forall eff a. HttpRequest -> Connection eff a -> SubscriberEff eff Unit
 setPongRequest req' impl = do
       prevReq <- readRef impl.pongRequest
