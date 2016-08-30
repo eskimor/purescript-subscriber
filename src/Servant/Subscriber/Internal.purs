@@ -37,7 +37,7 @@ import Data.StrMap.ST (STStrMap)
 import Data.Tuple (Tuple(Tuple), fst)
 import Partial.Unsafe (unsafeCrashWith)
 import Servant.PureScript.Util (reportError)
-import Servant.Subscriber.Request (HttpRequest(HttpRequest), Request(Subscribe, Unsubscribe))
+import Servant.Subscriber.Request (HttpRequest(HttpRequest), Request(Subscribe, Unsubscribe, SetPongRequest, SetCloseRequest))
 import Servant.Subscriber.Response (HttpResponse)
 import Servant.Subscriber.Types (Path(Path))
 import Unsafe.Coerce (unsafeCoerce)
@@ -49,11 +49,13 @@ type SubscriberEff eff = Eff (ref :: REF, ws :: WEBSOCKET, err :: EXCEPTION | ef
 type Orders a = StrMap (Order a)
 
 type Connection eff a = {
-    orders     :: Ref (Orders a)
-  , url        :: WS.URL
-  , callback   ::  a -> SubscriberEff eff Unit
-  , notify     ::  Notification -> SubscriberEff eff Unit
-  , connection :: Ref (Maybe WS.Connection)
+    orders       :: Ref (Orders a)
+  , url          :: WS.URL
+  , callback     ::  a -> SubscriberEff eff Unit
+  , notify       ::  Notification -> SubscriberEff eff Unit
+  , connection   :: Ref (Maybe WS.Connection)
+  , pongRequest  :: Ref (Maybe HttpRequest)
+  , closeRequest :: Ref (Maybe HttpRequest)
   }
 
 
@@ -207,12 +209,10 @@ onlyIfSent :: forall a. HttpRequest -> (OrderKey -> Orders a -> Orders a) -> Ord
 onlyIfSent req' action orders' =
   let
     key = makeOrderKey req'
-    order' = case orders' ^. at key of
-      Nothing -> unsafeCrashWith $ "onlyIfSent: req was not found in orders: " <> gShow req'
-      Just o  -> o
+    order' = orders' ^. at key
   in
-   case order'.state of
-     Sent -> action key orders'
+   case (_.state) <$> order' of
+     Just Sent -> action key orders'
      _    -> orders'
 
 handleDelete :: forall a. Path -> Orders a -> Orders a
@@ -269,6 +269,8 @@ getHttpReq :: Request -> HttpRequest
 getHttpReq req' = case req' of
   Subscribe hreq   -> hreq
   Unsubscribe hreq -> hreq
+  SetPongRequest hreq -> hreq
+  SetCloseRequest hreq -> hreq
 
 runHttpRequest (HttpRequest req') = req'
 
