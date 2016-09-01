@@ -47,6 +47,8 @@ instance semigroupSubscriptions :: Semigroup (Subscriptions a) where
 instance monoidSubscriptions :: Monoid (Subscriptions a) where
   mempty = Subscriptions $ StrMap.empty
 
+instance functorSubscriptions :: Functor Subscriptions where
+  map f (Subscriptions a) = Subscriptions $ map (mapSubscription f) a
 
 -- | Calculates the items which are in the first map but not in the second.
 --   In other words: All elements present in the second map will be removed from the first.
@@ -60,3 +62,6 @@ diffMaps a b = (mutate (\a' -> StrMap.foldM deleteItem a' b)) a
   where
     deleteItem :: forall x h r. STStrMap h x -> String -> x -> Eff (st :: ST h | r) (STStrMap h x)
     deleteItem m key _ = SM.delete m key
+
+mapSubscription :: forall a b. (a -> b) -> Subscription a -> Subscription b
+mapSubscription f orig = orig {  parseResponses  = map (map f) <$> orig.parseResponses }
