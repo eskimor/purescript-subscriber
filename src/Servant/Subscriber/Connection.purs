@@ -14,32 +14,25 @@ module Servant.Subscriber.Connection (
   , close
   ) where
 
-import Prelude
-import Control.Monad.Eff.Ref as Ref
-import Data.List as List
-import Data.Maybe (fromMaybe)
-import Data.StrMap as StrMap
-import Data.StrMap.ST as SM
-import Servant.Subscriber.Subscriptions as Subscriptions
-import WebSocket as WS
-import WebSocket as WS
 import Control.Bind ((<=<))
 import Control.Monad.Eff (Eff)
 import Control.Monad.Eff.Ref (modifyRef, readRef, writeRef, newRef)
+import Control.Monad.Eff.Ref as Ref
 import Control.Monad.ST (ST)
-import Data.Lens (_Just, (.~))
-import Data.Lens.At (at)
-import Data.List (List(Cons, Nil))
-import Data.Maybe (isJust, Maybe(Nothing, Just))
-import Data.StrMap (StrMap)
+
+import Data.List (List)
+import Data.List as List
+import Data.Maybe (isJust, Maybe(Nothing, Just), fromMaybe)
+
+import Data.StrMap as StrMap
 import Data.StrMap.ST (STStrMap)
-import Prelude (unit, Unit, bind, pure, (<<<), ($))
-import Servant.Subscriber.Internal (SubscriptionState(Ordered), getHttpReq, OrderKey, Order, mutate, Orders, makeOrderKey, Subscription, Notification, Connection, SubscriberEff)
+import Data.StrMap.ST as SM
+import Prelude
 import Servant.Subscriber.Internal (Connection, SubscriberEff, Notification(..), realize, ToUserType) as Exports
+import Servant.Subscriber.Internal (SubscriptionState(Ordered), getHttpReq, OrderKey, Order, mutate, Orders, makeOrderKey, Subscription, Notification, Connection, SubscriberEff)
 import Servant.Subscriber.Request (HttpRequest, Request(Unsubscribe, Subscribe, SetPongRequest, SetCloseRequest))
-import Servant.Subscriber.Subscriptions (Subscriptions)
-import Servant.Subscriber.Types (Path)
 import WebSocket (Code(Code))
+import WebSocket as WS
 
 type Config eff a = {
     url    :: String

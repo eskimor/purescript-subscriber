@@ -6,19 +6,19 @@ module Servant.Subscriber.Subscriptions (
   ) where
 
 import Prelude
-import Control.Monad.ST as ST
+
 import Data.StrMap as StrMap
 import Data.StrMap.ST as SM
 import Control.Monad.Eff (Eff)
 import Control.Monad.ST (ST)
-import Data.Function.Uncurried (Fn4, runFn4)
+import Data.Function.Uncurried (runFn4)
 import Data.Generic (gShow)
-import Data.List (List, List(Nil, Cons))
-import Data.Monoid ((<>), append, mempty, class Monoid, class Semigroup)
-import Data.StrMap (foldM, thawST, pureST, StrMap)
+import Data.List (List(Nil, Cons))
+import Data.Monoid (class Monoid)
+import Data.StrMap (StrMap, foldM)
 import Data.StrMap.ST (STStrMap)
 import Servant.Subscriber.Internal (_lookup, mutate, ToUserType, Subscription)
-import Servant.Subscriber.Request (HttpRequest(HttpRequest))
+import Servant.Subscriber.Request (HttpRequest)
 
 newtype Subscriptions a = Subscriptions (StrMap (Subscription a))
 
