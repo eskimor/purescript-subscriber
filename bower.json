@@ -28,7 +28,7 @@
   "repository": {
       "type": "git",
       "url": "git://github.com/eskimor/purescript-subscriber.git"
-  }
+  },
   "resolutions": {
     "purescript-dom": "^1.1.0"
   },
