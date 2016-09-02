@@ -110,11 +110,7 @@ realize impl = do
       mc <- readRef impl.connection
       case mc of
           Nothing -> makeConnection impl
-          Just c'@(WS.Connection c) -> do
-            rdy <- Var.get c.readyState
-            case rdy of
-              Open -> sendRequests c' impl
-              _    -> pure unit
+          Just c ->  sendRequests c impl
 
 -- | Takes care of actually subscribing stuff.
 sendRequests :: forall eff a. WS.Connection -> Connection eff a -> SubscriberEff eff Unit
@@ -146,11 +142,12 @@ makeConnection impl = do
       Var.set conn.onmessage $ messageHandler impl
       Var.set conn.onerror   $ errorHandler impl
       Var.set conn.onopen    $ openHandler (WS.Connection conn) impl
-      writeRef impl.connection $ Just (WS.Connection conn)
 
 
 openHandler :: forall eff a. WS.Connection -> Connection eff a -> Event -> SubscriberEff eff Unit
-openHandler conn impl _ = sendRequests conn impl
+openHandler conn impl _ = do
+  writeRef impl.connection $ Just conn
+  sendRequests conn impl
 
 closeHandler :: forall eff a. Connection eff a -> CloseEvent -> SubscriberEff eff Unit
 closeHandler impl ev = do
