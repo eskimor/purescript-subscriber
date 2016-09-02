@@ -3,6 +3,7 @@ module Servant.Subscriber.Subscriptions (
   , makeSubscriptions
   , diffSubscriptions
   , toList
+  , size
   ) where
 
 import Prelude
