@@ -12,6 +12,7 @@ module Servant.Subscriber.Connection (
   , setPongRequest
   , setCloseRequest
   , close
+  , getUrl
   ) where
 
 import Control.Bind ((<=<))
@@ -56,6 +57,10 @@ makeConnection c = do
         , pongRequest : pongRequest
         , closeRequest : closeRequest
         }
+-- | Which url is this subscriber connected to?
+getUrl :: forall eff a. Connection eff a -> String
+getUrl conn = case conn.url of
+  WS.URL url' -> url'
 
 -- | Drop all subscriptions and close connection.
 close :: forall eff a. Connection eff a -> SubscriberEff eff Unit
