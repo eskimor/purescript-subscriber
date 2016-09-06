@@ -9,12 +9,14 @@ import DOM.Websocket.Event.CloseEvent as CloseEvent
 import Data.List as List
 import Data.StrMap as StrMap
 import Data.StrMap.ST as SM
+import Data.StrMap.ST.Unsafe as ST
 import Servant.Subscriber.Response as Resp
 import WebSocket as WS
 import Control.Bind ((<=<))
 import Control.Monad.Eff (Eff)
 import Control.Monad.Eff.Exception (Error, EXCEPTION, catchException)
 import Control.Monad.Eff.Ref (Ref, REF, modifyRef, readRef, writeRef)
+import DOM (DOM)
 import DOM.Event.Types (keyboardEventToEvent, Event)
 import DOM.Websocket.Event.Types (CloseEvent, MessageEvent)
 import Data.Argonaut.Core (Json)
@@ -24,6 +26,7 @@ import Data.Argonaut.Printer (printJson)
 import Data.Bifunctor (lmap)
 import Data.Either (Either(Right, Left))
 import Data.Foldable (traverse_, sequence_, elem, intercalate, foldl)
+import Data.Function.Eff (EffFn2, runEffFn2)
 import Data.Function.Uncurried (Fn4)
 import Data.Generic (gShow, gEq, gCompare, class Generic)
 import Data.Lens ((^.), view, prism, (.~), _Just, _2)
@@ -42,7 +45,6 @@ import Servant.Subscriber.Response (HttpResponse)
 import Servant.Subscriber.Types (Path(Path))
 import Unsafe.Coerce (unsafeCoerce)
 import WebSocket (WEBSOCKET, Message(Message), ReadyState(Open), newWebSocket)
-import Data.StrMap.ST.Unsafe as ST
 
 type SubscriberEff eff = Eff (ref :: REF, ws :: WEBSOCKET, err :: EXCEPTION | eff)
 
@@ -157,7 +159,7 @@ closeHandler impl ev = do
         then pure unit
         else do
           modifyRef impl.orders $ updateSubscriptions
-          makeConnection impl
+          setTimeout (realize impl) 1500
       impl.notify $ WebSocketClosed ("code: " <> (show <<< CloseEvent.code) ev <> ", reason: " <> CloseEvent.reason ev)
   where
     isUnsubscribe :: Request -> Boolean
@@ -174,7 +176,7 @@ closeHandler impl ev = do
 errorHandler :: forall eff a. Connection eff a -> Event -> SubscriberEff eff Unit
 errorHandler impl ev = do
       impl.notify $ WebSocketError ((ErrorEvent.message <<< unsafeCoerce) ev)
-      realize impl -- Something went wrong - retry. (TODO: Probably better with some timeout!)
+      setTimeout (realize impl) 1500 -- Something went wrong - retry.
 
 
 messageHandler :: forall eff a. Connection eff a -> MessageEvent -> SubscriberEff eff Unit
@@ -279,6 +281,12 @@ mutate f m = ST.pureST (do
   ST.unsafeGet s)
 
 foreign import _lookup :: forall a z. Fn4 z (a -> z) String (StrMap a) z
+
+foreign import setTimeoutImpl :: forall eff.
+  EffFn2 eff (Eff eff Unit) Int Unit
+
+setTimeout :: forall eff. Eff eff Unit -> Int -> Eff eff Unit
+setTimeout = runEffFn2 setTimeoutImpl
 
 myThawST :: forall a h. StrMap a -> Eff ( st :: ST.ST h) (STStrMap h a)
 myThawST = unsafeCoerce thawST
