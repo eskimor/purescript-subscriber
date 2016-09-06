@@ -15,25 +15,23 @@ module Servant.Subscriber.Connection (
   , getUrl
   ) where
 
+import Prelude
+import Control.Monad.Eff.Ref as Ref
+import Data.List as List
+import Data.StrMap as StrMap
+import Data.StrMap.ST as SM
+import WebSocket as WS
 import Control.Bind ((<=<))
 import Control.Monad.Eff (Eff)
 import Control.Monad.Eff.Ref (modifyRef, readRef, writeRef, newRef)
-import Control.Monad.Eff.Ref as Ref
 import Control.Monad.ST (ST)
-
 import Data.List (List)
-import Data.List as List
 import Data.Maybe (isJust, Maybe(Nothing, Just), fromMaybe)
-
-import Data.StrMap as StrMap
 import Data.StrMap.ST (STStrMap)
-import Data.StrMap.ST as SM
-import Prelude
 import Servant.Subscriber.Internal (Connection, SubscriberEff, Notification(..), realize, ToUserType) as Exports
-import Servant.Subscriber.Internal (SubscriptionState(Ordered), getHttpReq, OrderKey, Order, mutate, Orders, makeOrderKey, Subscription, Notification, Connection, SubscriberEff)
+import Servant.Subscriber.Internal (makeOrderKey, SubscriptionState(Ordered), getHttpReq, OrderKey, Order, mutate, Orders, Subscription, Notification, Connection, SubscriberEff)
 import Servant.Subscriber.Request (HttpRequest, Request(Unsubscribe, Subscribe, SetPongRequest, SetCloseRequest))
 import WebSocket (Code(Code))
-import WebSocket as WS
 
 type Config eff a = {
     url    :: String
@@ -57,6 +55,7 @@ makeConnection c = do
         , pongRequest : pongRequest
         , closeRequest : closeRequest
         }
+
 -- | Which url is this subscriber connected to?
 getUrl :: forall eff a. Connection eff a -> String
 getUrl conn = case conn.url of
@@ -92,50 +91,54 @@ unsubscribe req' impl = do
           modifyRef impl.orders $ StrMap.update (Just <<< _ { req = Unsubscribe req', state = Ordered}) key
 
 -- | Set a request which will be issued by the server on every websocket pong event.
---
---   Currently a pong request can not be unset, once set it is there for eternity
---   you can only change it to something else. This of course can be fixed when needed!
---
---   WARNING: Don't ever subscribe a request and also call setPongRequest on it, this might not work as expected.
---            (The Subscribed response is used in both cases, so one of the two requests might never get confirmed)
---            Also never call setPongRequest and setCloseRequest on the same request. This restriction is mostly
---            because of laziness and can of course also be fixed!.
---
---   WARNING (another one): You have to call realize after calling this function, otherwise nothing will happen!
+-- |
+-- | Currently a pong request can not be unset, once set it is there for eternity
+-- | you can only change it to something else. This of course can be fixed when needed!
+-- |
+-- | WARNING: Don't ever subscribe a request and also call setPongRequest on it, this might not work as expected.
+-- |          (The Subscribed response is used in both cases, so one of the two requests might never get confirmed)
+-- |          Also never call setPongRequest and setCloseRequest on the same request. This restriction is mostly
+-- |          because of laziness and can of course also be fixed!.
+-- |
+-- | WARNING (another one): You have to call realize after calling this function, otherwise nothing will happen!
 setPongRequest :: forall eff a. HttpRequest -> Connection eff a -> SubscriberEff eff Unit
 setPongRequest req' impl = do
-      prevReq <- readRef impl.pongRequest
-      modifyRef impl.orders $
-         deletePrevious (makeOrderKey <$> prevReq)
-         >>> StrMap.insert (makeOrderKey req') { req : SetPongRequest req'
-                                               , parseResponses : List.Nil
-                                               ,  state : Ordered
-                                               }
-      writeRef impl.pongRequest $ Just req'
+      let newKey = makeOrderKey req'
+      prevKey <- readRef impl.pongRequest
+      when (Just newKey /= prevKey) $ do -- | Nothing new - no need to do anything.
+        modifyRef impl.orders $
+          deletePrevious prevKey
+          >>> StrMap.insert newKey { req : SetPongRequest req'
+                                   , parseResponses : List.Nil
+                                   , state : Ordered
+                                   }
+        writeRef impl.pongRequest $ Just newKey
 
 -- | Set a request which will be issued by the server when the websocket connection closes for any reason.
---
---   Currently a close request can not be unset, once set it is there for eternity
---   you can only change it to something else. This of course can be fixed when needed!
---
---   WARNING: Don't ever subscribe a request and also call setCloseRequest on it, this might not work as expected.
---            (The `Subscribed` response is used in both cases, so one of the two requests might never get confirmed)
---            Also never call `setPongRequest` and `setCloseRequest` on the same request. This restriction is mostly
---            because of my laziness and can of course also be fixed!.
+-- |
+-- | Currently a close request can not be unset, once set it is there for eternity
+-- | you can only change it to something else. This of course can be fixed when needed!
+-- |
+-- | WARNING: Don't ever subscribe a request and also call setCloseRequest on it, this might not work as expected.
+-- |          (The `Subscribed` response is used in both cases, so one of the two requests might never get confirmed)
+-- |          Also never call `setPongRequest` and `setCloseRequest` on the same request. This restriction is mostly
+-- |          because of my laziness and can of course also be fixed!.
 setCloseRequest :: forall eff a. HttpRequest -> Connection eff a -> SubscriberEff eff Unit
 setCloseRequest req' impl = do
-      prevReq <- readRef impl.closeRequest
-      modifyRef impl.orders $
-         deletePrevious (makeOrderKey <$> prevReq)
-         >>> StrMap.insert (makeOrderKey req') { req : SetCloseRequest req'
-                                               , parseResponses : List.Nil
-                                               ,  state : Ordered
-                                               }
-      writeRef impl.closeRequest $ Just req'
+      let newKey = makeOrderKey req'
+      prevKey <- readRef impl.closeRequest
+      when (Just newKey /= prevKey) $ do -- | Nothing new - no need to do anything.
+        modifyRef impl.orders $
+          deletePrevious prevKey
+          >>> StrMap.insert newKey { req : SetCloseRequest req'
+                                   , parseResponses : List.Nil
+                                   , state : Ordered
+                                   }
+        writeRef impl.closeRequest $ Just newKey
 
 -- | Add all given subscriptions to orders for being subscribed.
---
--- For actually sending requests to the server call `realize`.
+-- |
+-- | For actually sending requests to the server call `realize`.
 subscribeAll :: forall eff a. List (Subscription a) -> Connection eff a -> SubscriberEff eff Unit
 subscribeAll subsList impl = do
     modifyRef impl.orders $ insertSubscriptions subsList
@@ -151,8 +154,8 @@ mutSubscribe orders sub = do
   SM.poke orders (makeOrderKey sub.req) new
 
 -- | Unsubscribe all given requests.
---
--- For actually sending requests to the server call `realize`.
+-- |
+-- | For actually sending requests to the server call `realize`.
 unsubscribeAll :: forall eff a. List HttpRequest -> Connection eff a -> SubscriberEff eff Unit
 unsubscribeAll reqs impl = do
   let

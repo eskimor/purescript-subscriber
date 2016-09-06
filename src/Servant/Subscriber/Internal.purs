@@ -51,11 +51,11 @@ type Orders a = StrMap (Order a)
 type Connection eff a = {
     orders       :: Ref (Orders a)
   , url          :: WS.URL
-  , callback     ::  a -> SubscriberEff eff Unit
-  , notify       ::  Notification -> SubscriberEff eff Unit
+  , callback     :: a -> SubscriberEff eff Unit
+  , notify       :: Notification -> SubscriberEff eff Unit
   , connection   :: Ref (Maybe WS.Connection)
-  , pongRequest  :: Ref (Maybe HttpRequest)
-  , closeRequest :: Ref (Maybe HttpRequest)
+  , pongRequest  :: Ref (Maybe OrderKey)
+  , closeRequest :: Ref (Maybe OrderKey)
   }
 
 
