@@ -26,10 +26,10 @@ import Control.Monad.Eff (Eff)
 import Control.Monad.Eff.Ref (modifyRef, readRef, writeRef, newRef)
 import Control.Monad.ST (ST)
 import Data.List (List)
-import Data.Maybe (isJust, Maybe(Nothing, Just), fromMaybe)
+import Data.Maybe (Maybe(Nothing, Just), fromMaybe)
 import Data.StrMap.ST (STStrMap)
 import Servant.Subscriber.Internal (Connection, SubscriberEff, Notification(..), realize, ToUserType) as Exports
-import Servant.Subscriber.Internal (makeOrderKey, SubscriptionState(Ordered), getHttpReq, OrderKey, Order, mutate, Orders, Subscription, Notification, Connection, SubscriberEff)
+import Servant.Subscriber.Internal (makeOrderKey, SubscriptionState(Ordered), getHttpReq, OrderKey, Order, mutate, Orders, Subscription, Notification, Connection, SubscriberEff, ConnectionState(..))
 import Servant.Subscriber.Request (HttpRequest, Request(Unsubscribe, Subscribe, SetPongRequest, SetCloseRequest))
 import WebSocket (Code(Code))
 
@@ -42,7 +42,7 @@ type Config eff a = {
 
 makeConnection :: forall eff a. Config eff a -> SubscriberEff eff (Connection eff a)
 makeConnection c = do
-      connRef <- newRef Nothing
+      connRef <- newRef NoConnection
       orders <-  Ref.newRef StrMap.empty
       pongRequest <- Ref.newRef Nothing
       closeRequest <- Ref.newRef Nothing
@@ -67,8 +67,9 @@ close impl = do
       writeRef impl.orders StrMap.empty
       mConn <- readRef impl.connection
       case mConn of
-        Nothing -> pure unit
-        Just (WS.Connection conn) -> conn.close' (Code 1000) Nothing
+        NoConnection -> pure unit
+        ConnectionRequested -> writeRef impl.connection NoConnection
+        Established (WS.Connection conn) -> conn.close' (Code 1000) Nothing
 
 -- | Add a single subscription to orders.
 --
@@ -85,10 +86,10 @@ unsubscribe :: forall eff a. HttpRequest -> Connection eff a -> SubscriberEff ef
 unsubscribe req' impl = do
       mc <- readRef impl.connection
       case mc of
-        Nothing -> modifyRef impl.orders $ StrMap.delete (makeOrderKey req')
-        Just c -> do
+        Established c -> do
           let key = makeOrderKey req'
           modifyRef impl.orders $ StrMap.update (Just <<< _ { req = Unsubscribe req', state = Ordered}) key
+        _ -> modifyRef impl.orders $ StrMap.delete (makeOrderKey req')
 
 -- | Set a request which will be issued by the server on every websocket pong event.
 -- |
@@ -161,8 +162,11 @@ unsubscribeAll reqs impl = do
   let
     keys = map makeOrderKey reqs
   mc <- readRef impl.connection
-  modifyRef impl.orders $ deleteSubscriptions (isJust mc) keys
+  modifyRef impl.orders $ deleteSubscriptions (isEstablished mc) keys
   where
+    isEstablished :: ConnectionState -> Boolean
+    isEstablished (Established _) = true
+    isEstablished _               = false
     deleteSubscriptions :: Boolean -> List OrderKey -> Orders a -> Orders a
     deleteSubscriptions isActive keys = mutate (\orders' -> List.foldM (mutUnsubscribe isActive) orders' keys)
 

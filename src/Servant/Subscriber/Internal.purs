@@ -55,13 +55,17 @@ type Connection eff a = {
   , url          :: WS.URL
   , callback     :: a -> SubscriberEff eff Unit
   , notify       :: Notification -> SubscriberEff eff Unit
-  , connection   :: Ref (Maybe WS.Connection)
+  , connection   :: Ref ConnectionState
   , pongRequest  :: Ref (Maybe OrderKey)
   , closeRequest :: Ref (Maybe OrderKey)
   }
 
 
 type OrderKey = String
+
+data ConnectionState = NoConnection
+                     | ConnectionRequested
+                     | Established WS.Connection
 
 makeOrderKey :: HttpRequest -> OrderKey
 makeOrderKey = gShow
@@ -111,8 +115,9 @@ realize :: forall eff a. Connection eff a -> SubscriberEff eff Unit
 realize impl = do
       mc <- readRef impl.connection
       case mc of
-          Nothing -> makeConnection impl
-          Just c ->  sendRequests c impl
+          NoConnection -> makeConnection impl
+          ConnectionRequested -> pure unit
+          Established c ->  sendRequests c impl
 
 -- | Takes care of actually subscribing stuff.
 sendRequests :: forall eff a. WS.Connection -> Connection eff a -> SubscriberEff eff Unit
@@ -133,13 +138,14 @@ initConnection :: forall eff a. Connection eff a -> SubscriberEff eff Unit
 initConnection impl = do
       mConn <- readRef impl.connection
       case mConn of
-        Nothing -> makeConnection impl
-        Just _ -> pure unit
+        NoConnection -> makeConnection impl
+        _ -> pure unit
 
 
 makeConnection :: forall eff a. Connection eff a -> SubscriberEff eff Unit
 makeConnection impl = do
       WS.Connection conn <- newWebSocket impl.url []
+      writeRef impl.connection ConnectionRequested
       Var.set conn.onclose   $ closeHandler impl
       Var.set conn.onmessage $ messageHandler impl
       Var.set conn.onerror   $ errorHandler impl
@@ -147,13 +153,20 @@ makeConnection impl = do
 
 
 openHandler :: forall eff a. WS.Connection -> Connection eff a -> Event -> SubscriberEff eff Unit
-openHandler conn impl _ = do
-  writeRef impl.connection $ Just conn
-  sendRequests conn impl
+openHandler conn@(WS.Connection conn') impl _ = do
+  prevState <- readRef impl.connection
+  case prevState of
+    ConnectionRequested -> do
+      writeRef impl.connection $ Established conn
+      sendRequests conn impl
+    NoConnection -> -- Close was requested
+      conn'.close' (WS.Code 1000) Nothing
+    Established _ -> -- Anything else is an error - we have a bug in this library.
+      unsafeCrashWith "purescript-subscriber: openHandler called, but connection was already open!"
 
 closeHandler :: forall eff a. Connection eff a -> CloseEvent -> SubscriberEff eff Unit
 closeHandler impl ev = do
-      writeRef impl.connection Nothing
+      writeRef impl.connection NoConnection
       subs <- readRef impl.orders
       if StrMap.isEmpty subs
         then pure unit
