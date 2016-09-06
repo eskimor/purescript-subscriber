@@ -187,9 +187,8 @@ closeHandler impl ev = do
           map ( _ { state = Ordered } ) cleanedSubs
 
 errorHandler :: forall eff a. Connection eff a -> Event -> SubscriberEff eff Unit
-errorHandler impl ev = do
-      impl.notify $ WebSocketError ((ErrorEvent.message <<< unsafeCoerce) ev)
-      setTimeout (realize impl) 1500 -- Something went wrong - retry.
+errorHandler impl ev = 
+  impl.notify $ WebSocketError ((ErrorEvent.message <<< unsafeCoerce) ev)
 
 
 messageHandler :: forall eff a. Connection eff a -> MessageEvent -> SubscriberEff eff Unit
