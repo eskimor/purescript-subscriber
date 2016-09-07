@@ -13,6 +13,7 @@ import Data.StrMap.ST.Unsafe as ST
 import Servant.Subscriber.Response as Resp
 import WebSocket as WS
 import Control.Bind ((<=<))
+import Control.Monad (unless)
 import Control.Monad.Eff (Eff)
 import Control.Monad.Eff.Exception (Error, EXCEPTION, catchException)
 import Control.Monad.Eff.Ref (Ref, REF, modifyRef, readRef, writeRef)
@@ -168,11 +169,10 @@ closeHandler :: forall eff a. Connection eff a -> CloseEvent -> SubscriberEff ef
 closeHandler impl ev = do
       writeRef impl.connection NoConnection
       subs <- readRef impl.orders
-      if StrMap.isEmpty subs
-        then pure unit
-        else do
-          modifyRef impl.orders $ updateSubscriptions
-          setTimeout (realize impl) 1500
+      let updatedSubs = updateSubscriptions subs
+      writeRef impl.orders updatedSubs
+      unless (StrMap.isEmpty updatedSubs)
+        $ setTimeout (realize impl) 1500
       impl.notify $ WebSocketClosed ("code: " <> (show <<< CloseEvent.code) ev <> ", reason: " <> CloseEvent.reason ev)
   where
     isUnsubscribe :: Request -> Boolean
