@@ -80,6 +80,7 @@ type Subscription a = {
 
 
 data Notification = WebSocketError String
+           | WebSocketOpened
            | WebSocketClosed String
            | HttpRequestFailed HttpRequest HttpResponse
            | ParseError String -- |< Server response could not be parsed/ Server could not parse our request.
@@ -159,6 +160,7 @@ openHandler conn@(WS.Connection conn') impl _ = do
   case prevState of
     ConnectionRequested -> do
       writeRef impl.connection $ Established conn
+      impl.notify WebSocketOpened
       sendRequests conn impl
     NoConnection -> -- Close was requested
       conn'.close' (WS.Code 1000) Nothing
