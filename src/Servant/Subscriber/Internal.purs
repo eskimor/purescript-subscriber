@@ -33,7 +33,7 @@ import Data.Generic (gShow, gEq, gCompare, class Generic)
 import Data.Lens ((^.), view, prism, (.~), _Just, _2)
 import Data.Lens.At (at)
 import Data.Lens.Lens (lens)
-import Data.Lens.Types (PrismP, LensP)
+import Data.Lens.Types (Prism', Lens')
 import Data.List (List, filter)
 import Data.Maybe (Maybe(Nothing, Just))
 import Data.StrMap (thawST, pureST, StrMap)
@@ -101,10 +101,10 @@ type Order a = {
   , state :: SubscriptionState
   }
 
-req :: forall r a. LensP ({ req :: a | r}) a
+req :: forall r a. Lens' ({ req :: a | r}) a
 req = lens _.req (\r -> r { req = _ })
 
-state :: forall r a. LensP ({ state :: a | r}) a
+state :: forall r a. Lens' ({ state :: a | r}) a
 state = lens _.state (\r -> r { state = _ })
 
 
@@ -189,7 +189,7 @@ closeHandler impl ev = do
           map ( _ { state = Ordered } ) cleanedSubs
 
 errorHandler :: forall eff a. Connection eff a -> Event -> SubscriberEff eff Unit
-errorHandler impl ev = 
+errorHandler impl ev =
   impl.notify $ WebSocketError ((ErrorEvent.message <<< unsafeCoerce) ev)
 
 
@@ -229,7 +229,7 @@ onlyIfSent req' action orders' =
      _    -> orders'
 
 handleDelete :: forall a. Path -> Orders a -> Orders a
-handleDelete p = StrMap.fromList <<< filter canStay <<< StrMap.toList
+handleDelete p = StrMap.fromFoldable <<< filter canStay <<< StrMap.toList
   where
     canStay :: Tuple String (Order a) -> Boolean
     canStay (Tuple _ order) = let req' = runHttpRequest $ getHttpReq order.req
@@ -265,7 +265,7 @@ doDecode parser str = do
       parser $ Just jVal
 
 -- | Prism for only setting a value if it is equal to a.
-match :: forall a. Eq a => a -> PrismP a a
+match :: forall a. Eq a => a -> Prism' a a
 match a = prism id $ \b -> if a == b then Right a else Left b
 
 
